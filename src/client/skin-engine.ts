@@ -75,7 +75,7 @@ function findTargets(entry: TextOverride): Element[] {
 
 /** Empty (identity) skin used when the persisted document is absent. */
 function defaultSkin(): SkinSettings {
-  return { enabled: false, tokens: {}, css: [], text: [], canvas: { background: undefined, images: [] }, library: [] }
+  return { enabled: false, tokens: {}, css: [], text: [], canvas: { background: undefined, images: [] }, layers: [], library: [] }
 }
 
 /**
@@ -112,6 +112,10 @@ export function currentSettingsPageKey(doc: Document): string {
  */
 export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride {
   const cleanups: Array<() => void> = []
+  // Set before the first cleanup runs: a queued MutationObserver microtask must
+  // not re-apply anything after dispose (React rebuilds and late mounts can land
+  // between the last observed mutation and the teardown).
+  let disposed = false
 
   // Snapshot <body>'s raw inline style BEFORE any skin write. The restore itself is
   // pushed LAST (below), so it runs after the per-property removeProperty cleanups
@@ -160,6 +164,7 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
   // re-renders and late mounts until the skin is disposed.
   if (embedTargets.length > 0 && typeof document !== 'undefined' && typeof MutationObserver !== 'undefined') {
     const retag = (): void => {
+      if (disposed) return
       const curKey = currentSettingsPageKey(document)
       for (const img of embedTargets) {
         // Page scoping: an image embedded on one settings page must not leak onto
@@ -246,6 +251,7 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
   if (layerList.length > 0 && typeof document !== 'undefined') {
     const injectedNodes = new Set<Element>()
     const injectLayer = (layer: InjectedLayer): void => {
+      if (disposed) return
       const container = document.querySelector(layer.selector)
       if (container === null) return
       const key = '[data-dsh-myskin-layer="' + layer.id + '"]'
@@ -301,6 +307,7 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
   if ((skin.css ?? []).some((r2) => String(r2.selector).includes('data-maid-')) && typeof document !== 'undefined' && typeof MutationObserver !== 'undefined') {
     const decorated = new Set<HTMLElement>()
     const decorate = (): void => {
+      if (disposed) return
       document.querySelectorAll<HTMLElement>("[role='tree']").forEach((tree) => {
         const rows = Array.from(tree.querySelectorAll<HTMLElement>("[role='treeitem']"))
         if (tree.matches("[class*='flatList']") && !rows.some((r) => r.hasAttribute('aria-expanded'))) {
@@ -354,6 +361,7 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
     let scheduled = false
     const applyTexts = (): void => {
       scheduled = false
+      if (disposed) return
       for (const entry of textEntries) {
         for (const el of findTargets(entry)) {
           const node = directTextNode(el)
@@ -399,6 +407,7 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
 
   return {
     dispose(): void {
+      disposed = true
       for (const cleanup of cleanups.splice(0)) cleanup()
     },
   }

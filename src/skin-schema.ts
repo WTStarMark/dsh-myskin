@@ -10,8 +10,11 @@
  *   - library: named saved skins for one-tap switching.
  */
 
-/** Settings namespace owned by the skin plugin. */
-export const SKIN_SETTINGS_NAMESPACE = 'myskin'
+/** Settings namespace owned by the skin plugin (equals the profile entry id). */
+export const SKIN_SETTINGS_NAMESPACE = 'dsh-myskin'
+
+/** Namespace used by builds before the 0.2 migration; still followed when the Host serves it. */
+export const LEGACY_SETTINGS_NAMESPACE = 'myskin'
 
 /** One token override: both palette modes are mandatory. */
 export interface TokenModes { light: string; dark: string }

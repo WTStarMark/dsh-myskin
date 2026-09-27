@@ -1,35 +1,25 @@
 /**
- * dsh-myskin Host (server) half.
+ * dsh-myskin Host (server) half — DSH 0.1.7 model.
  *
- * Registers the durable `myskin` settings namespace so the browser scope has a
- * persisted document to bind against. Everything visual is applied by the
- * client plugin AFTER the UI mounts — this half never touches DOM, never edits
- * DSH source or config, and only owns schema + persistence.
- *
- * Purposefully self-contained: schemastery (`z`) is inlined by the build, and
- * `settingsNamespace` is the identity function (no `@deepseek-ai/dsh-settings`
- * runtime import), so the host bundle loads with ZERO external `@deepseek-ai`
- * dependencies — safe to load as a path-based entry.
+ * The durable skin document is this plugin entry's own `Config` (see
+ * ./host-schema.ts): DSH resolves, stores and broadcasts it, and the profile
+ * patch file is where edits land. That makes this half deliberately empty —
+ * no service, no DOM, no imperative settings registration, no `@deepseek-ai`
+ * imports beyond the schema — which is also what keeps it loadable from a
+ * profile bundle on both the Web and the Desktop profiles.
  */
-
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-host-webserver'
+import { Config } from './host-schema.ts'
 import { SKIN_SETTINGS_NAMESPACE } from './skin-schema.ts'
-import { SkinSettingsSchema } from './host-schema.ts'
 
-/** Brand a raw string as a settings namespace (identity; dsh-settings does this). */
-function settingsNamespace(value: string): string {
-  return value
-}
+export { Config }
 
-const SKIN_NAMESPACE = settingsNamespace(SKIN_SETTINGS_NAMESPACE)
+/** Cordis plugin name; identical to the settings namespace and the entry id. */
+export const name = SKIN_SETTINGS_NAMESPACE
 
 /**
- * Register the durable skin section when the settings service is composed.
- * @param ctx - Host context that may acquire the settings service.
+ * Host plugin body: nothing to compose. DSH owns the schema, the persistence
+ * and the change broadcast; the browser half applies the skin after the UI
+ * mounts.
  */
-export function apply(ctx: Context): void {
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.register(SKIN_NAMESPACE, SkinSettingsSchema)
-  })
-}
+export function apply(): void {}

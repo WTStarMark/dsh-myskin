@@ -12,10 +12,8 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { ChangeEvent, CSSProperties, MouseEvent, PointerEvent, ReactNode } from 'react'
-import {
-  IconCloseOutline16, IconPersonalizationOutline16, IconPlusOutline16, IconTrashOutline16,
-  Button, Pill, Input, Modal,
-} from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Pill, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconClose, IconPersonalization, IconPlus, IconTrash } from './icons.ts'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
@@ -124,6 +122,8 @@ function persist(scope: ConfigForm<SkinSettings>, skin: SkinSettings): Promise<b
     scope.set('css', skin.css),
     scope.set('text', skin.text),
     scope.set('canvas', skin.canvas),
+    scope.set('layers', skin.layers),
+    scope.set('content', skin.content ?? {}),
     scope.set('library', skin.library),
   ])
 }
@@ -330,7 +330,7 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
       </div>
 
       <div style={lastRowStyle}>
-        <Button style={btnBase} variant="outline" icon={<IconPersonalizationOutline16 size={16} />} onClick={() => { openSkinEditor(skin, t, (next) => update(next), () => {}) }}>{t('edit')}</Button>
+        <Button style={btnBase} variant="outline" icon={<IconPersonalization size={16} />} onClick={() => { openSkinEditor(skin, t, (next) => update(next), () => {}) }}>{t('edit')}</Button>
         <Button style={btnBase} variant="outline" onClick={onPreview}>{t('preview')}</Button>
         <Button style={btnBase} onClick={applyNow}>{t('apply')}</Button>
         <Button style={btnBase} variant="ghost" onClick={reset}>{t('reset')}</Button>
@@ -353,10 +353,10 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
               <span style={{ flex: 1 }} />
               <Button style={btnBase} size="sm" variant="ghost" onClick={() => { moveSkin(entry, -1) }}>{t('layerUp')}</Button>
               <Button style={btnBase} size="sm" variant="ghost" onClick={() => { moveSkin(entry, 1) }}>{t('layerDown')}</Button>
-              <Button style={btnBase} size="sm" variant="ghost" icon={<IconPlusOutline16 size={14} />} onClick={() => { duplicateSkin(entry) }}>{t('duplicate')}</Button>
+              <Button style={btnBase} size="sm" variant="ghost" icon={<IconPlus size={14} />} onClick={() => { duplicateSkin(entry) }}>{t('duplicate')}</Button>
               <Button style={btnBase} size="sm" variant="ghost" onClick={() => { renameSkin(entry) }}>{t('rename')}</Button>
               <Button style={btnBase} size="sm" variant="outline" onClick={() => { loadSkin(entry) }}>{t('load')}</Button>
-              <Button style={btnBase} size="sm" variant="ghost" icon={<IconTrashOutline16 size={14} />} onClick={() => { deleteSkin(entry.id) }}>{t('remove')}</Button>
+              <Button style={btnBase} size="sm" variant="ghost" icon={<IconTrash size={14} />} onClick={() => { deleteSkin(entry.id) }}>{t('remove')}</Button>
             </div>
           ))}
         </>
@@ -642,22 +642,22 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
   return (
     <div data-dsh-myskin-ui="1" data-dsh-myskin-canvas="1" style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', flexDirection: 'column', background: 'var(--dsw-alias-bg-overlay)', color: tok.labelPrimary }}>
       <div data-dsh-myskin-ui="1" style={{ flex: 'none', minHeight: 48, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 16px', background: tok.bgOverlay, borderBottom: '1px solid var(--dsw-alias-border-l1)', zIndex: 10005, color: tok.labelPrimary }}>
-        <IconPersonalizationOutline16 size={16} />
+        <IconPersonalization size={16} />
         <span style={{ fontSize: 14, lineHeight: '22px', fontWeight: 500 }}>{t('title')} — {t('edit')}</span>
         <span style={{ flex: 1 }} />
         <Button style={btnBase} size="sm" variant={mode === 'edit' ? 'primary' : 'ghost'} onClick={toggleMode}>{mode === 'edit' ? t('interactMode') : t('selectMode')}</Button>
         <Button style={btnBase} size="sm" variant="ghost" onClick={undo} disabled={pastRef.current.length === 0}>{t('undo')}</Button>
         <Button style={btnBase} size="sm" variant="ghost" onClick={redo} disabled={futureRef.current.length === 0}>{t('redo')}</Button>
         <Button style={btnBase} size="sm" variant={showTokens ? 'primary' : 'ghost'} onClick={() => { setShowTokens(!showTokens) }}>{t('tokenPanel')}</Button>
-        <Button style={btnBase} variant="outline" icon={<IconPlusOutline16 size={16} />} onClick={() => { if (selected === undefined) setHint(t('selectFirst')); else embedBgRef.current?.click() }}>{t('embedImage')}</Button>
-        <Button style={btnBase} variant="outline" icon={<IconPlusOutline16 size={16} />} onClick={() => { pageBgRef.current?.click() }}>{t('backgroundImage')}</Button>
+        <Button style={btnBase} variant="outline" icon={<IconPlus size={16} />} onClick={() => { if (selected === undefined) setHint(t('selectFirst')); else embedBgRef.current?.click() }}>{t('embedImage')}</Button>
+        <Button style={btnBase} variant="outline" icon={<IconPlus size={16} />} onClick={() => { pageBgRef.current?.click() }}>{t('backgroundImage')}</Button>
         {draft.canvas.background !== undefined && draft.canvas.background !== '' ? (
           <Button style={btnBase} size="sm" variant="ghost" onClick={clearPageBg}>{t('clearBackground')}</Button>
         ) : null}
         {hint !== undefined ? <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{hint}</span> : null}
         <Button style={btnBase} onClick={onApply}>{t('apply')}</Button>
-        <Button style={btnBase} variant="ghost" icon={<IconTrashOutline16 size={16} />} onClick={resetDraft}>{t('reset')}</Button>
-        <Button style={btnBase} variant="ghost" icon={<IconCloseOutline16 size={16} />} onClick={onClose}>{t('close')}</Button>
+        <Button style={btnBase} variant="ghost" icon={<IconTrash size={16} />} onClick={resetDraft}>{t('reset')}</Button>
+        <Button style={btnBase} variant="ghost" icon={<IconClose size={16} />} onClick={onClose}>{t('close')}</Button>
       </div>
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <iframe ref={iframeRef} src={location.href} onLoad={() => { setIframeDoc(iframeRef.current?.contentDocument) }} style={{ flex: 1, border: 'none', background: 'transparent' }} />
@@ -923,7 +923,7 @@ function Inspector({ target, draft, onSample, onText, onRemove, onEmbedOpacity, 
         <Button style={btnBase} variant="outline" onClick={applyText}>{t('editText')}</Button>
 
         <Button style={btnBase} variant="ghost" onClick={() => { onHide(selectorOf(target)) }}>{t('hide')}</Button>
-        <Button style={btnBase} variant="ghost" icon={<IconTrashOutline16 size={16} />} onClick={() => { onRemove(selectorOf(target)) }}>{t('remove')}</Button>
+        <Button style={btnBase} variant="ghost" icon={<IconTrash size={16} />} onClick={() => { onRemove(selectorOf(target)) }}>{t('remove')}</Button>
       </div>
       </>)}
 
@@ -939,7 +939,7 @@ function Inspector({ target, draft, onSample, onText, onRemove, onEmbedOpacity, 
                 style={{ background: tok.bgBase, color: tok.labelPrimary, border: '1px solid ' + tok.borderL2, borderRadius: 4, fontSize: 12, lineHeight: '18px', padding: '2px 4px' }}>
                 {BLEND_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{t(o.labelKey)}</option>))}
               </select>
-              <Button style={btnBase} size="sm" variant="ghost" icon={<IconTrashOutline16 size={14} />} onClick={() => { onRemoveEmbed(img.id) }}>{t('remove')}</Button>
+              <Button style={btnBase} size="sm" variant="ghost" icon={<IconTrash size={14} />} onClick={() => { onRemoveEmbed(img.id) }}>{t('remove')}</Button>
             </div>
           ))}
         </div>

@@ -1,0 +1,13 @@
+# dsh-myskin bundle layer (DSH 0.1.7+).
+#
+# A profile that lists this package in `dsh.profile.bundles` composes this file
+# over the profile root, so the plugin row exists because the package itself
+# declares it: no hand-written row in the profile patch and no junction in the
+# shared profiles node_modules (that route is legacy).
+#
+# The entry id is also the settings namespace: the browser half reaches the
+# durable skin document through `configForms.get("dsh-myskin")`, and DSH stores
+# edits for that entry in the profile patch file.
+- insert:
+    - id: dsh-myskin
+      name: dsh-myskin

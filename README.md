@@ -1,31 +1,89 @@
-# dsh-myskin
+# dsh-myskin (v0.2.0)
 
 DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设置页。
-非侵入式：不修改 DSH 源码/配置，不改 DSH 进程；皮肤是完全可逆的覆盖层。
+非侵入式：不改 DSH 源码 / 配置、不改 DSH 进程；皮肤是完全可逆的覆盖层。
+
+**适配：DSH 0.1.7-rc.2（Web 与 Desktop 共用同一条客户端插件管线）。**
+
+DSH ≥0.1.7 移除了命令式 `settings.register(ns, schema)`。本包随之改为官方形态：
+**profile bundle + 导出 schemastery `Config`**，命名空间 = 插件条目 id = `dsh-myskin`。
 
 ## 结构
-- src/index.ts          —— Host 半区：注册 settings 命名空间（schema）。
-- src/skin-schema.ts    —— 皮肤数据模型（tokens / css / text / canvas / layers）。
-- src/client/index.ts   —— 浏览器半区：注册「皮肤管理」设置节 + 实时皮肤生命周期。
-- src/client/skin-engine.ts —— 可逆应用引擎（ctx.theme 令牌 + style 标签 + 文本替换 + 图片图层 + **真实节点图层注入**）。
-- src/client/MySkinSection.tsx —— 设置页 + 画布编辑器（透明覆盖真实 DSH DOM + 实时预览）。
 
-## 构建
-在本包内用 esbuild 直接产出运行时产物（无需 DSH 仓库的 tsdown/类型发射）：
-  node scripts/build.cjs              # 产出 lib/client.js + lib/index.js
-  node scripts/build.cjs --watch      # 监听源码变更自动重建
-等价 npm script：`npm run bundle`（构建）/ `npm run watch`（监听）。
+- `cordis.patch.yml` —— bundle 层：声明自己的插件条目（`id: dsh-myskin`）。
+- `src/index.ts` —— Host 半区：导出 `Config` + `name`，无服务、无 DOM、无注册调用。
+- `src/host-schema.ts` —— schemastery 皮肤文档 schema（每个顶层字段 `.volatile()`）。
+- `src/skin-schema.ts` —— 皮肤数据模型（tokens / css / text / canvas / layers / content / library）。
+- `src/client/index.ts` —— 浏览器半区：`configForms.whileServed` 绑定命名空间 + 实时皮肤生命周期。
+- `src/client/skin-engine.ts` —— 可逆应用引擎（官方令牌通道 + 皮肤自有 `<style>` + 真实节点图层注入 + 文本替换）。
+- `src/client/icons.ts` —— 图标候选表（跨 0.1.6/0.1.7 两代命名，缺失时降级为空渲染）。
+- `src/client/MySkinSection.tsx` —— 设置页 + 画布编辑器（透明覆盖真实 DSH DOM + 实时预览）。
 
-> 说明：`tsdown.config.ts` 走 DSH 仓库的 clientBundle 预设，要求 DSH 构建管线先
-> 发射 `lib/types/index.js`（本包 `tsconfig.json` 为 `noEmit`，且依赖 DSH workspace 的
-> `@deepseek-ai/*`，无法脱离 DSH 仓库单独生成），因此日常开发以 `scripts/build.cjs` 为准。
+## 构建 / 测试 / 自检
 
-## 装载（仅用户 patch 层，不动 DSH）
-在 ~/.dsh/profiles/web/cordis.patch.yml 追加一行 insert，用绝对路径指向本包；
-DSH 通过 HMR 热更该用户层，无需重启进程。此步骤为 guarded，执行前先确认。
+```bash
+npm install                 # esbuild + jsdom（构建与测试依赖）
+npm run build               # 产出 lib/index.js + lib/client.js
+npm run watch               # 监听重建
+npm test                    # node:test（schema / 令牌 / jsdom 可逆性，共 11 例）
+npm run check:compat        # 对着本机 DSH 安装复验 图标 / --dsw-* 令牌 / API
+```
+
+`scripts/build.cjs` 不依赖 DSH 仓库：esbuild 依次从 `DSH_MYSKIN_ESBUILD`、本包 `node_modules`、
+DSH 安装的 pnpm store 解析。`scripts/check-compat.mjs` 默认读 `/opt/dsh-web`，可用 `--dsh <dir>`
+或 `DSH_INSTALL` 覆盖。
+
+## 装载（Web 与 Desktop 各装一次）
+
+DSH 0.1.7 的第三方插件形态是 **profile bundle**：包内自带 `cordis.patch.yml`，由该 profile 的
+`dsh.profile.bundles` 选中（旧的「profiles/node_modules 软链 + 手写 insert 行」是 legacy 路线）。
+
+- Web profile：`$DSH_HOME/profiles/web`
+- Desktop profile：`$DSH_HOME/profiles/desktop`（Desktop = Electron 壳 + 同一个 Host + 同一个 Web 文档）
+
+每个 profile 各做一次：
+
+1. 把本包放进该 profile 的依赖（`link:<绝对路径>` 或 npm tarball）；
+2. 在该 profile 的 `package.json` 的 `dsh.profile.bundles` 追加 `dsh-myskin`；
+3. HMR（`patchReload: live`）即时生效，否则重启。
+
+也可以用 Web 侧栏 **Plugins** 页或 `plugin_manager` 工具安装 bundle。
+
+> 本仓库**只交付产物**：没有替你写任何 profile 文件、没有改动 DSH 安装。
+
+## 数据与持久化
+
+- 条目 id / 命名空间：`dsh-myskin`（旧 id `myskin` 若仍被 Host 服务，客户端同样会跟随）。
+- 设置写入该 profile 的 `cordis.patch.yml`（`dsh-config-editor` 的 `documentPath`），因此
+  **web 与 desktop 的皮肤互不共享**——用皮肤库导出/导入搬运。
+- 所有顶层字段都是 `volatile`，画布可逐次热改而不重挂载插件。
+
+## 兼容性对照
+
+| 面 | ≤0.1.6 | 0.1.7-rc.2（本包） |
+|---|---|---|
+| 设置注册 | `settings.register(ns, schema)` | 导出 schemastery `Config`，条目 id 即命名空间 |
+| 可编辑标记 | — | 每个顶层字段 `.volatile()` |
+| 图标 | `IconCloseOutline16` | `IconCloseOutlineRegular` / `Medium`（运行时候选表兼容两代） |
+| 客户端上下文类型 | `@deepseek-ai/dsh-client-runtime/client` | `@deepseek-ai/cordis` |
+| 装载 | profile patch 手写 insert 行 | `dsh.bundle.patch` + `dsh.profile.bundles` |
+| schemastery | — | ≥3.18.4（`.volatile()` 由该版本提供） |
+
+`npm run check:compat` 在 0.1.7-rc.2 上的实测输出：18 个目录令牌 + 44 个预设令牌全部命中、
+`configForms.whileServed` / `ConfigForm.set|unset|getSnapshot` / `settings.section` slot /
+`theme.overrideTokens` / `SettingsForms` / schemastery `.volatile()` 全部存在。
 
 ## 安全
-- 不杀/不重启 DSH；不改 DSH 源码与 cordis.yml。
-- 皮肤应用带快照 + dispose，退出编辑/停用即精确还原（字节级：`layers` 注入的皮肤自有节点与自有的 `<style>` 全部移除；引擎不写 `<body>` 内联 style，艺术变量放皮肤自有 `<style>`，不残留 `style=""`）。
-- 画布为插件自己的透明全屏覆盖层（不深拷贝），编辑态通过独立 style 标签实时预览，
-  覆盖层移除或提交即消失/进入正式皮肤。
+
+- 不杀 / 不重启 DSH；不改 DSH 源码与全局配置。
+- 应用带快照 + `dispose`，停用即字节级还原：皮肤自有节点（`data-dsh-myskin-layer`）与皮肤自有
+  `<style id="dsh-myskin-rule">` 全部移除，`body.outerHTML` 与启用前逐字节一致。
+- dispose 后置 `disposed` 守卫：排队中的 MutationObserver 微任务不会再回写（React 重建、晚挂载、
+  多窗口场景不会留下残影）。
+- 画布是插件自己的透明覆盖层（不深拷贝 DOM），提交/关闭即消失。
+
+## 桌面端（Desktop）
+
+Desktop 渲染的就是同一份 Web 文档，并把 `/plugins/*` 转发给同一个 Host，因此
+`dsh.client.platform: "web"` 的客户端插件在桌面端**原样运行**，不需要第二套产物；
+只需把本包装进 `profiles/desktop`。上游 Desktop 目前只打包 macOS / Windows。

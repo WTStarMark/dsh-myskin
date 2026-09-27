@@ -1,36 +1,89 @@
-const esbuild = require('D:/Mochen/Project/deepseek-harness/node_modules/.pnpm/esbuild@0.25.12/node_modules/esbuild/lib/main.js')
-const my = 'D:/Mochen/Project/dsh-myskin'
+/**
+ * Portable bundle build for dsh-myskin (Windows / macOS / Linux).
+ *
+ * Replaces the original build that hard-coded a Windows checkout path. esbuild
+ * is discovered in this order: DSH_MYSKIN_ESBUILD, this package's own
+ * node_modules, a local DSH install's pnpm store, then normal resolution.
+ *
+ * Client half: CJS closure-factory bundle in DSH's module-loader wrapper, with
+ * the frozen platform module table's names external (React + UI primitives come
+ * from the shell, so they must NOT be bundled).
+ * Host half: ESM with schemastery external (DSH 0.1.7 supplies 3.18.4, whose
+ * `.volatile()` the Config schema needs).
+ */
+const fs = require('node:fs')
+const path = require('node:path')
+
+const root = path.resolve(__dirname, '..')
 const watch = process.argv.includes('--watch')
-const define = {
-  'process.env.NODE_ENV': '"production"'
-  ,'import.meta.env.MODE': '"production"'
-  ,'import.meta.env': '{"MODE":"production"}'
+
+/**
+ * Load esbuild from the first location that has it.
+ * @returns the esbuild module.
+ */
+function loadEsbuild() {
+  const explicit = process.env.DSH_MYSKIN_ESBUILD
+  const local = path.join(root, 'node_modules', 'esbuild', 'lib', 'main.js')
+  for (const candidate of [explicit, local]) {
+    if (candidate && fs.existsSync(candidate)) return require(candidate)
+  }
+  try { return require('esbuild') } catch { /* not installed here */ }
+  const dshRoot = process.env.DSH_INSTALL || '/opt/dsh-web'
+  const store = path.join(dshRoot, 'node_modules', '.pnpm')
+  if (fs.existsSync(store)) {
+    const dir = fs.readdirSync(store).filter((name) => name.startsWith('esbuild@')).sort().pop()
+    if (dir) return require(path.join(store, dir, 'node_modules', 'esbuild', 'lib', 'main.js'))
+  }
+  throw new Error('esbuild not found: run "npm install" here, or set DSH_MYSKIN_ESBUILD')
 }
+
+const esbuild = loadEsbuild()
+const define = { 'process.env.NODE_ENV': '"production"' }
 const banner = { js: 'window.__ModuleLoader__.load({ id: "dsh-myskin", factory: (require) => { var module = { exports: {} }; var exports = module.exports;' }
 const footer = { js: 'return module.exports; } });' }
 
-// Client: closure-factory format. Externals = shell-provided module-table rows.
 const clientOptions = {
-  entryPoints: [my + '/src/client/index.ts'],
-  bundle: true, format: 'cjs', platform: 'browser',
-  outfile: my + '/lib/client.js',
+  entryPoints: [path.join(root, 'src', 'client', 'index.ts')],
+  bundle: true,
+  format: 'cjs',
+  platform: 'browser',
+  outfile: path.join(root, 'lib', 'client.js'),
   external: ['react', 'react/jsx-runtime', 'react-dom/client', '@deepseek-ai/dsh-client-ui-primitives'],
-  jsx: 'automatic', define, banner, footer,
-}
-// Host: self-contained (zero external @deepseek-ai).
-const hostOptions = {
-  entryPoints: [my + '/src/index.ts'],
-  bundle: true, format: 'esm', platform: 'node', target: 'es2024',
-  outfile: my + '/lib/index.js',
-  external: [],
+  jsx: 'automatic',
+  define,
+  banner,
+  footer,
+  logLevel: 'warning',
 }
 
-if (!watch) {
+const hostOptions = {
+  entryPoints: [path.join(root, 'src', 'index.ts')],
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  target: 'es2024',
+  outfile: path.join(root, 'lib', 'index.js'),
+  external: ['@deepseek-ai/schemastery'],
+  logLevel: 'warning',
+}
+
+/**
+ * Print one artifact's path and size.
+ * @param label - human label for the artifact.
+ * @param outfile - absolute artifact path.
+ */
+function report(label, outfile) {
+  const bytes = fs.statSync(outfile).size
+  console.log(label + ': ' + path.relative(root, outfile) + ' (' + bytes + ' bytes)')
+}
+
+if (watch) {
+  Promise.all([esbuild.context(clientOptions), esbuild.context(hostOptions)])
+    .then(([client, host]) => { client.watch(); host.watch(); console.log('watching...') })
+    .catch((error) => { console.error(error); process.exit(1) })
+} else {
   esbuild.buildSync(clientOptions)
   esbuild.buildSync(hostOptions)
-  console.log('built')
-} else {
-  Promise.all([esbuild.context(clientOptions), esbuild.context(hostOptions)])
-    .then(([a, b]) => { a.watch(); b.watch(); console.log('watching...') })
-    .catch((err) => { console.error(err); process.exit(1) })
+  report('client', clientOptions.outfile)
+  report('host', hostOptions.outfile)
 }
