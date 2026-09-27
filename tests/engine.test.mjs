@@ -146,6 +146,20 @@ test('background strength 100% leaves every app surface untouched', () => {
   override.dispose()
 })
 
+test('the background strength round-trips through the schema-safe marker rule', () => {
+  const css = engine.withBackgroundOpacity([{ selector: '#a', rule: 'color: red' }], 0.6)
+  assert.equal(css.length, 2)
+  assert.equal(css[1].selector, ':root')
+  assert.match(css[1].rule, /--dsh-myskin-bg-opacity: 0\.6/)
+  assert.equal(engine.readBackgroundOpacity(engine.currentSkin({ canvas: { images: [] }, css })), 0.6)
+  // The dedicated field wins once the Host schema actually projects it.
+  const projected = engine.currentSkin({ canvas: { images: [], backgroundOpacity: 0.9 }, css })
+  assert.equal(engine.readBackgroundOpacity(projected), 0.9)
+  // Mirroring is idempotent: re-dragging never stacks markers.
+  assert.equal(engine.withBackgroundOpacity(css, 0.5).filter((rule) => rule.selector === ':root').length, 1)
+  assert.equal(engine.readBackgroundOpacity(engine.currentSkin({ canvas: { images: [] } })), engine.DEFAULT_BACKGROUND_OPACITY)
+})
+
 test('an empty skin is inert', () => {
   const window = setup()
   const before = window.document.body.outerHTML

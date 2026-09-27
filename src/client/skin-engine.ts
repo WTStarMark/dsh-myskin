@@ -12,7 +12,7 @@
  */
 
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
-import type { InjectedLayer, SkinSettings, TextOverride, TokenModes } from '../skin-schema.ts'
+import type { CssRule, InjectedLayer, SkinSettings, TextOverride, TokenModes } from '../skin-schema.ts'
 
 export const PLUGIN_ID = 'dsh-myskin'
 const STYLE_ID = 'dsh-myskin-rule'
@@ -119,6 +119,48 @@ export function currentSettingsPageKey(doc: Document): string {
 
 /** Surface strength used when the document does not name one. */
 export const DEFAULT_BACKGROUND_OPACITY = 0.75
+
+/** Selector of the marker rule that mirrors the background strength into `css`. */
+export const BG_OPACITY_SELECTOR = ':root'
+/** Custom property carried by the marker rule. */
+export const BG_OPACITY_PROPERTY = '--dsh-myskin-bg-opacity'
+
+/**
+ * Effective background strength of a skin document.
+ *
+ * `canvas.backgroundOpacity` is the real field, but a Host whose Config schema
+ * predates it does not project the field back to the browser (DSH describes only
+ * schema-declared paths), so the editor also mirrors the value into a marker CSS
+ * rule — `css` has been schema-declared since the first release. Reading prefers
+ * the field and falls back to the marker, so the value round-trips either way.
+ * @param skin - the skin document.
+ * @returns the strength, clamped by the caller, or the default when absent.
+ */
+export function readBackgroundOpacity(skin: SkinSettings): number {
+  const explicit = skin.canvas.backgroundOpacity
+  if (typeof explicit === 'number' && Number.isFinite(explicit)) return explicit
+  for (const rule of skin.css ?? []) {
+    if (rule.selector !== BG_OPACITY_SELECTOR) continue
+    const match = rule.rule.match(/--dsh-myskin-bg-opacity:\s*([\d.]+)/)
+    if (match !== null) {
+      const value = Number(match[1])
+      if (Number.isFinite(value)) return value
+    }
+  }
+  return DEFAULT_BACKGROUND_OPACITY
+}
+
+/**
+ * Mirror the strength into the marker rule (idempotent: the previous marker is dropped).
+ * @param css - the document's CSS rules.
+ * @param opacity - the strength to store.
+ * @returns a new rule list ending with the marker.
+ */
+export function withBackgroundOpacity(css: readonly CssRule[], opacity: number): CssRule[] {
+  const value = String(Math.round(opacity * 100) / 100)
+  const rest = (css ?? []).filter((rule) => !(rule.selector === BG_OPACITY_SELECTOR && rule.rule.includes(BG_OPACITY_PROPERTY)))
+  return [...rest.map((rule) => ({ selector: rule.selector, rule: rule.rule })), { selector: BG_OPACITY_SELECTOR, rule: BG_OPACITY_PROPERTY + ': ' + value + ';' }]
+}
 
 /**
  * Rules that let a body background image show through the shell surface WITHOUT
@@ -260,7 +302,7 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
     // DSH paints opaque surfaces over <body>, so also make the base surfaces
     // semi-transparent (kept INSIDE the skin-owned <style>, removed on dispose, so
     // <body>'s inline style is never touched and the skin stays byte-reversible).
-    if (typeof document !== 'undefined') rules.push(...backgroundSurfaceRules(document, skin.canvas.backgroundOpacity))
+    if (typeof document !== 'undefined') rules.push(...backgroundSurfaceRules(document, readBackgroundOpacity(skin)))
   }
   for (const { selector, rule } of skin.css) {
     if (selector !== '' && rule !== '') rules.push(`${selector} { ${rule} }`)

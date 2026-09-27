@@ -17,8 +17,8 @@ import { IconClose, IconPersonalization, IconPlus, IconTrash } from './icons.ts'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
-import { parseSkin, EMPTY_SKIN, type BlendMode, type EmbeddedImage, type NamedSkin, type SkinSettings, type TokenOverrides } from '../skin-schema.ts'
-import { DEFAULT_BACKGROUND_OPACITY, backgroundSurfaceRules, currentSettingsPageKey } from './skin-engine.ts'
+import { parseSkin, EMPTY_SKIN, type BlendMode, type CssRule, type EmbeddedImage, type NamedSkin, type SkinCanvas, type SkinSettings, type TokenOverrides } from '../skin-schema.ts'
+import { backgroundSurfaceRules, currentSettingsPageKey, readBackgroundOpacity, withBackgroundOpacity } from './skin-engine.ts'
 import type { MySkinKey } from './locales.ts'
 import { PRESETS } from './presets.ts'
 import { TOKEN_CATALOG, TOKEN_GROUP_KEYS, type TokenGroup } from './token-catalog.ts'
@@ -149,13 +149,13 @@ function closeSkinEditor(): void {
   editorHost.container.remove()
   editorHost = undefined
 }
-function openSkinEditor(initial: SkinSettings, t: (k: MySkinKey) => string, onCommit: (next: SkinSettings) => Promise<boolean>, onClose: () => void): void {
+function openSkinEditor(initial: SkinSettings, t: (k: MySkinKey) => string, onCommit: (next: SkinSettings) => Promise<boolean>, onClose: () => void, onPersistStrength: (canvas: SkinCanvas, css: CssRule[]) => Promise<boolean>): void {
   closeSkinEditor()
   const container = document.createElement('div')
   document.body.appendChild(container)
   editorHost = { root: createRoot(container), container }
   editorHost.root.render(
-    <SkinCanvas initial={initial} t={t} onCommit={async (next) => { const ok = await onCommit(next); if (ok) closeSkinEditor(); return ok }} onClose={() => { onClose(); closeSkinEditor() }} />,
+    <SkinCanvas initial={initial} t={t} onPersistStrength={onPersistStrength} onCommit={async (next) => { const ok = await onCommit(next); if (ok) closeSkinEditor(); return ok }} onClose={() => { onClose(); closeSkinEditor() }} />,
   )
 }
 
@@ -207,6 +207,20 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
     setSkin(parseSkin(next))
     try {
       const accepted = await persist(scope, next)
+      return accepted.every((ok) => ok)
+    } catch { return false }
+  }
+
+  /**
+   * Persist only the canvas + css fields, so the strength slider saves without
+   * committing unrelated draft edits.
+   * @param canvas - the canvas object to store.
+   * @param css - the rule list carrying the strength marker.
+   * @returns true when both fields were accepted.
+   */
+  const persistStrength = async (canvas: SkinCanvas, css: CssRule[]): Promise<boolean> => {
+    try {
+      const accepted = await Promise.all([scope.set('canvas', canvas), scope.set('css', css)])
       return accepted.every((ok) => ok)
     } catch { return false }
   }
@@ -342,7 +356,7 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
       </div>
 
       <div style={lastRowStyle}>
-        <Button style={btnBase} variant="outline" icon={<IconPersonalization size={16} />} onClick={() => { close?.(); openSkinEditor(skin, t, (next) => persistNow(next), () => {}) }}>{t('edit')}</Button>
+        <Button style={btnBase} variant="outline" icon={<IconPersonalization size={16} />} onClick={() => { close?.(); openSkinEditor(skin, t, (next) => persistNow(next), () => {}, (canvas, css) => persistStrength(canvas, css)) }}>{t('edit')}</Button>
         <Button style={btnBase} variant="outline" onClick={onPreview}>{t('preview')}</Button>
         <Button style={btnBase} onClick={applyNow}>{t('apply')}</Button>
         <Button style={btnBase} variant="ghost" onClick={reset}>{t('reset')}</Button>
@@ -445,11 +459,13 @@ interface CanvasProps {
   initial: SkinSettings
   onClose: () => void
   onCommit: (next: SkinSettings) => Promise<boolean>
+  /** Persist just the canvas + css fields (the strength slider auto-saves). */
+  onPersistStrength: (canvas: SkinCanvas, css: CssRule[]) => Promise<boolean>
   t: (key: MySkinKey) => string
 }
 
 /** Full-screen canvas editor over the live DSH DOM (transparent overlay). */
-function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
+function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: CanvasProps): ReactNode {
   const [draft, setDraft] = useState<SkinSettings>(() => parseSkin(initial))
   const [selected, setSelected] = useState<Element | undefined>(undefined)
   const [mode, setMode] = useState<'edit' | 'interact'>('edit')
@@ -571,7 +587,7 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
     const rules: string[] = []
     if (draft.canvas.background !== undefined && draft.canvas.background !== '') {
       rules.push('body { background-image: url("' + draft.canvas.background + '") !important; background-size: cover !important; background-position: center !important; }')
-      rules.push(...backgroundSurfaceRules(document, draft.canvas.backgroundOpacity))
+      rules.push(...backgroundSurfaceRules(document, readBackgroundOpacity(draft)))
     }
     for (const { selector, rule } of draft.css) {
       if (selector !== '' && rule !== '') rules.push(selector + ' { ' + rule + ' }')
@@ -597,7 +613,7 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
       liveStyleRef.current.remove()
       liveStyleRef.current = null
     }
-  }, [draft.css, draft.canvas.background, draft.canvas.images])
+  }, [draft.css, draft.canvas.background, draft.canvas.backgroundOpacity, draft.canvas.images])
 
   // Remove the live style tag on unmount.
   useEffect(() => () => { if (liveStyleRef.current !== null) { liveStyleRef.current.remove(); liveStyleRef.current = null } }, [])
@@ -729,6 +745,18 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
   }
   const toggleMode = (): void => { setMode(mode === 'edit' ? 'interact' : 'edit') }
 
+  // Debounced auto-save for the strength slider: the value must survive a refresh
+  // even when the user never presses 应用.
+  const strengthTimer = useRef<number | undefined>(undefined)
+  useEffect(() => () => { if (strengthTimer.current !== undefined) window.clearTimeout(strengthTimer.current) }, [])
+  const schedulePersistStrength = (canvas: SkinCanvas, css: CssRule[]): void => {
+    if (strengthTimer.current !== undefined) window.clearTimeout(strengthTimer.current)
+    strengthTimer.current = window.setTimeout(() => {
+      strengthTimer.current = undefined
+      void onPersistStrength(canvas, css).then((ok) => { if (!ok) setHint(t('applyFailed')) })
+    }, 400)
+  }
+
   const selRect = selected !== undefined && selected.isConnected ? selected.getBoundingClientRect() : null
 
   return (
@@ -755,12 +783,18 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
       <div ref={panelRef} data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', position: 'absolute', top: 'var(--dsh-myskin-inset-top, 48px)', right: 0, bottom: 0, width: 340, display: 'flex', flexDirection: 'column', gap: 12, overflow: 'auto', padding: 12, background: tok.bgOverlay, borderLeft: '1px solid ' + tok.borderL2, zIndex: 10004 }}>
         {draft.canvas.background !== undefined && draft.canvas.background !== '' ? (
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: tok.labelSecondary }}>
-            <span>{t('backgroundOpacity')} · {Math.round((draft.canvas.backgroundOpacity ?? DEFAULT_BACKGROUND_OPACITY) * 100)}%</span>
+            <span>{t('backgroundOpacity')} · {Math.round(readBackgroundOpacity(draft) * 100)}%</span>
             <input
               type="range" min={0.35} max={1} step={0.05}
-              value={draft.canvas.backgroundOpacity ?? DEFAULT_BACKGROUND_OPACITY}
+              value={readBackgroundOpacity(draft)}
               onPointerDown={() => { snapshot() }}
-              onChange={(e) => { setDraft({ ...draft, canvas: { ...draft.canvas, backgroundOpacity: Number(e.target.value) } }) }}
+              onChange={(e) => {
+                const opacity = Number(e.target.value)
+                const canvas = { ...draft.canvas, backgroundOpacity: opacity }
+                const css = withBackgroundOpacity(draft.css, opacity)
+                setDraft({ ...draft, canvas, css })
+                schedulePersistStrength(canvas, css)
+              }}
             />
           </label>
         ) : null}
