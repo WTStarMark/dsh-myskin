@@ -80,6 +80,16 @@ DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设
 
 「皮肤管理」页保存/加载/复制/重命名/删除；命名皮肤 = `{id,name,tokens,css,text,canvas,layers}`；导出 `dsh-myskin.json`（完整 `SkinSettings`），导入写回 `dsh-myskin` 条目。**Web 与 Desktop 的 profile 文档互不共享**，跨端搬运靠导出/导入。
 
+## 6.5 Agent 工作流：设计并交付一套主题
+
+1. **只读现状**：`$DSH_HOME/profiles/<profile>/cordis.patch.yml` → `id: dsh-myskin` 的 `config`（该 YAML 含 `!!js` 标签，用 Python 读要先给 `tag:yaml.org,2002:js` 注册构造器，否则 PyYAML 报 `could not determine a constructor`）。
+2. **设计**：产出完整 `SkinSettings` JSON（`enabled/tokens/css/text/canvas/layers/library`）。
+3. **校验**：每个 `--dsw-*` 必须在当前 DSH 的 `@deepseek-ai/dsh-client-ui-theme` 里存在（未知令牌静默无效）；可跑 `npm run check:compat`。
+4. **交付**：JSON 放工作区（如 `examples/`），由用户「皮肤管理 → 导入皮肤」导入。
+5. **不要手写 profile patch**：那是 R-001 红线，且单行 170KB+ 的 YAML 极易写坏。
+6. **导入 = 整体替换**（`parseSkin(json)` 后覆盖全文档）：不想丢壁纸就在 JSON 里带 `canvas.background`；不想丢皮肤库就带 `library`；导入前先「导出皮肤」备份。
+7. 主题若要控制壁纸浓淡，**同时**写 `canvas.backgroundOpacity` 和 `css` 里的 `:root { --dsh-myskin-bg-opacity: … }` 标记（旧 schema 下前者读不回来）。
+
 ## 7. 安全 / 可逆
 
 1. **可逆叠加层**：`enabled:false` 或清空即精确还原，无需重启。
@@ -95,3 +105,5 @@ DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设
 - **直接改 `cordis.patch.yml`**：先备份、先 read；不要把 YAML 键拼到上一行尾。
 - `layers` 的 `selector` 应指向安全容器（`body` 或非 React 映射列表的普通包装 `:scope > div`），别插进 React 管理的映射列表中间；`content.workspaceTree` 走内置装饰器（不注入节点，React 安全）。
 - **皮肤不生效/回退默认**：看 console 是否报错；看有无 `<style id="dsh-myskin-rule">`；确认该 profile 的插件条目真的被服务（`settings describe` 里应出现 `dsh-myskin`）。
+- **导入/加载会整体替换文档**：先「导出皮肤」备份，否则当前壁纸与皮肤库会被覆盖。
+- **背景强度滑块**：拖动即时预览、松手 400ms 自动保存，不需要点「应用」。
