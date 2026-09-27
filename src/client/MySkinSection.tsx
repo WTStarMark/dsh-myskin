@@ -757,7 +757,7 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: tok.labelSecondary }}>
             <span>{t('backgroundOpacity')} · {Math.round((draft.canvas.backgroundOpacity ?? DEFAULT_BACKGROUND_OPACITY) * 100)}%</span>
             <input
-              type="range" min={0.5} max={1} step={0.05}
+              type="range" min={0.35} max={1} step={0.05}
               value={draft.canvas.backgroundOpacity ?? DEFAULT_BACKGROUND_OPACITY}
               onPointerDown={() => { snapshot() }}
               onChange={(e) => { setDraft({ ...draft, canvas: { ...draft.canvas, backgroundOpacity: Number(e.target.value) } }) }}

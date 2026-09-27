@@ -118,7 +118,7 @@ export function currentSettingsPageKey(doc: Document): string {
 }
 
 /** Surface strength used when the document does not name one. */
-export const DEFAULT_BACKGROUND_OPACITY = 0.9
+export const DEFAULT_BACKGROUND_OPACITY = 0.75
 
 /**
  * Rules that let a body background image show through the shell surface WITHOUT
@@ -137,15 +137,20 @@ export const DEFAULT_BACKGROUND_OPACITY = 0.9
  */
 export function backgroundSurfaceRules(doc: Document, opacity: number = DEFAULT_BACKGROUND_OPACITY): string[] {
   if (!(opacity < 0.999)) return []
-  const alpha = Math.min(0.98, Math.max(0.3, opacity))
+  const base = Math.min(0.98, Math.max(0.35, opacity))
   const frame = doc.querySelector('[class*="_frame"]') as HTMLElement | null
   for (const el of [frame, doc.body]) {
     if (el === null || el === undefined) continue
     const parsed = parseCssColor(getComputedStyle(el).backgroundColor)
     // A fully transparent surface would tint the whole app black: try the next one.
     if (parsed === undefined || parsed.a === 0) continue
-    const rgba = 'rgba(' + parsed.r + ', ' + parsed.g + ', ' + parsed.b + ', ' + alpha + ')'
-    return ['body { --dsw-alias-bg-base: ' + rgba + ' !important; }']
+    const rgb = parsed.r + ', ' + parsed.g + ', ' + parsed.b
+    const rules = ['body { --dsw-alias-bg-base: rgba(' + rgb + ', ' + base + ') !important; }']
+    // Panels keep more body than the canvas: text on cards stays crisp while the
+    // wallpaper still reads as texture. Dialogs/menus (layer-2/overlay) never move.
+    const panel = Math.min(1, base + 0.15)
+    if (panel < 0.999) rules.push('body { --dsw-alias-bg-layer-1: rgba(' + rgb + ', ' + panel + ') !important; }')
+    return rules
   }
   return []
 }

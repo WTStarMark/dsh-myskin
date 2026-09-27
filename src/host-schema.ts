@@ -79,7 +79,7 @@ const namedSkin = z.object({
   tokens: z.dict(modes).default({}),
   css: z.array(cssRule).default([]),
   text: z.array(textRule).default([]),
-  canvas: z.object({ background: z.string(), backgroundOpacity: z.number().min(0.3).max(1).default(0.9), images: z.array(embeddedImage).default([]) }).default({}),
+  canvas: z.object({ background: z.string(), backgroundOpacity: z.number().min(0.35).max(1).default(0.75), images: z.array(embeddedImage).default([]) }).default({}),
   layers: z.array(injectedLayer).default([]),
 })
 
@@ -91,7 +91,7 @@ export const Config = z.object({
   text: z.array(textRule).default([]).volatile(),
   canvas: z.object({
     background: z.string(),
-    backgroundOpacity: z.number().min(0.3).max(1).default(0.9),
+    backgroundOpacity: z.number().min(0.35).max(1).default(0.75),
     images: z.array(embeddedImage).default([]),
   }).default({}).volatile(),
   layers: z.array(injectedLayer).default([]).volatile(),
