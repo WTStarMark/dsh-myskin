@@ -145,11 +145,13 @@ export function backgroundSurfaceRules(doc: Document, opacity: number = DEFAULT_
     // A fully transparent surface would tint the whole app black: try the next one.
     if (parsed === undefined || parsed.a === 0) continue
     const rgb = parsed.r + ', ' + parsed.g + ', ' + parsed.b
-    const rules = ['body { --dsw-alias-bg-base: rgba(' + rgb + ', ' + base + ') !important; }']
+    // Round to two decimals so 0.8 + 0.15 does not leak float noise into the CSS.
+    const fmt = (value: number): string => String(Math.round(value * 100) / 100)
+    const rules = ['body { --dsw-alias-bg-base: rgba(' + rgb + ', ' + fmt(base) + ') !important; }']
     // Panels keep more body than the canvas: text on cards stays crisp while the
     // wallpaper still reads as texture. Dialogs/menus (layer-2/overlay) never move.
     const panel = Math.min(1, base + 0.15)
-    if (panel < 0.999) rules.push('body { --dsw-alias-bg-layer-1: rgba(' + rgb + ', ' + panel + ') !important; }')
+    if (panel < 0.999) rules.push('body { --dsw-alias-bg-layer-1: rgba(' + rgb + ', ' + fmt(panel) + ') !important; }')
     return rules
   }
   return []
