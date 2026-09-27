@@ -29,17 +29,30 @@ interface TextPatch {
   applied: string
 }
 
-/** Convert a CSS color (rgb/rgba/#hex) to an rgba() string with the given alpha. */
-function toRgba(color: string, alpha: number): string {
-  const m = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)/)
-  if (m !== null) return 'rgba(' + m[1] + ', ' + m[2] + ', ' + m[3] + ', ' + alpha + ')'
-  const h = color.match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/)
-  if (h !== null) {
-    const hex = h[1].length === 3 ? h[1].split('').map((c) => c + c).join('') : h[1]
-    const r = parseInt(hex.slice(0, 2), 16), g = parseInt(hex.slice(2, 4), 16), b = parseInt(hex.slice(4, 6), 16)
-    return 'rgba(' + r + ', ' + g + ', ' + b + ', ' + alpha + ')'
+/** One parsed CSS colour: 0..255 channels plus the existing alpha. */
+interface CssColor { r: number; g: number; b: number; a: number }
+
+/**
+ * Parse an rgb()/rgba()/#rgb/#rrggbb/#rrggbbaa colour.
+ * @param color - a computed or authored colour string.
+ * @returns the parsed channels, or undefined when the syntax is not recognised.
+ */
+function parseCssColor(color: string): CssColor | undefined {
+  const m = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)/)
+  if (m !== null) {
+    const raw = m[4]
+    const alpha = raw === undefined ? 1 : (raw.endsWith('%') ? Number(raw.slice(0, -1)) / 100 : Number(raw))
+    return { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]), a: Number.isFinite(alpha) ? alpha : 1 }
   }
-  return ''
+  const h = color.match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/)
+  if (h === null) return undefined
+  const hex = h[1].length === 3 ? h[1].split('').map((c) => c + c).join('') : h[1]
+  return {
+    r: parseInt(hex.slice(0, 2), 16),
+    g: parseInt(hex.slice(2, 4), 16),
+    b: parseInt(hex.slice(4, 6), 16),
+    a: hex.length === 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1,
+  }
 }
 
 /** Direct text node of an element (ignores nested element text for matching). */
@@ -104,34 +117,45 @@ export function currentSettingsPageKey(doc: Document): string {
   return label + '@' + pos
 }
 
+/** Surface strength used when the document does not name one. */
+export const DEFAULT_BACKGROUND_OPACITY = 0.9
+
+/**
+ * Rules that let a body background image show through the shell surface WITHOUT
+ * washing the UI out.
+ *
+ * Only `--dsw-alias-bg-base` is overridden: that is the shell canvas the
+ * conversation sits on. Card, menu and dialog surfaces (`bg-layer-1`,
+ * `bg-layer-2`, `bg-overlay`) keep their own opaque colours — making those
+ * translucent is what made text unreadable. `opacity` is how strongly the shell
+ * surface covers the image (1 = leave the app untouched; the image simply does
+ * not show through).
+ *
+ * @param doc - document to measure (the live page).
+ * @param opacity - shell surface opacity, 0..1.
+ * @returns CSS rules, or an empty array when nothing should be overridden.
+ */
+export function backgroundSurfaceRules(doc: Document, opacity: number = DEFAULT_BACKGROUND_OPACITY): string[] {
+  if (!(opacity < 0.999)) return []
+  const alpha = Math.min(0.98, Math.max(0.3, opacity))
+  const frame = doc.querySelector('[class*="_frame"]') as HTMLElement | null
+  for (const el of [frame, doc.body]) {
+    if (el === null || el === undefined) continue
+    const parsed = parseCssColor(getComputedStyle(el).backgroundColor)
+    // A fully transparent surface would tint the whole app black: try the next one.
+    if (parsed === undefined || parsed.a === 0) continue
+    const rgba = 'rgba(' + parsed.r + ', ' + parsed.g + ', ' + parsed.b + ', ' + alpha + ')'
+    return ['body { --dsw-alias-bg-base: ' + rgba + ' !important; }']
+  }
+  return []
+}
+
 /**
  * Apply the skin to the live document.
  * @param theme - the DSH theme registry service (`ctx.theme`).
  * @param skin - the skin definition to apply.
  * @returns a `SkinOverride` whose `dispose` reverts every byte this call changed.
  */
-/**
- * Rules that let a body background image show through DSH's opaque surfaces.
- * DSH paints `--dsw-alias-bg-base` and the layer surfaces over <body>, so a
- * background image alone is invisible: the base surface is made semi-transparent
- * from its own computed colour. Shared by the applied skin and the editor preview
- * so what you see while editing is what gets committed.
- * @param doc - document to measure (the live page).
- * @returns CSS rules, or an empty array when no colour could be measured.
- */
-export function backgroundSurfaceRules(doc: Document): string[] {
-  const frame = doc.querySelector('[class*="_frame"]') as HTMLElement | null
-  const base = frame !== null ? getComputedStyle(frame).backgroundColor : getComputedStyle(doc.body).backgroundColor
-  const rgba = toRgba(base, 0.55)
-  if (rgba === '') return []
-  return [
-    'body { --dsw-alias-bg-base: ' + rgba + ' !important; }',
-    'body { --dsw-alias-bg-layer-1: ' + rgba + ' !important; }',
-    'body { --dsw-alias-bg-layer-2: ' + rgba + ' !important; }',
-    'body { --dsw-alias-bg-overlay: ' + rgba + ' !important; }',
-  ]
-}
-
 export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride {
   const cleanups: Array<() => void> = []
   // Set before the first cleanup runs: a queued MutationObserver microtask must
@@ -229,7 +253,7 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
     // DSH paints opaque surfaces over <body>, so also make the base surfaces
     // semi-transparent (kept INSIDE the skin-owned <style>, removed on dispose, so
     // <body>'s inline style is never touched and the skin stays byte-reversible).
-    if (typeof document !== 'undefined') rules.push(...backgroundSurfaceRules(document))
+    if (typeof document !== 'undefined') rules.push(...backgroundSurfaceRules(document, skin.canvas.backgroundOpacity))
   }
   for (const { selector, rule } of skin.css) {
     if (selector !== '' && rule !== '') rules.push(`${selector} { ${rule} }`)

@@ -18,7 +18,7 @@ import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { parseSkin, EMPTY_SKIN, type BlendMode, type EmbeddedImage, type NamedSkin, type SkinSettings, type TokenOverrides } from '../skin-schema.ts'
-import { backgroundSurfaceRules, currentSettingsPageKey } from './skin-engine.ts'
+import { DEFAULT_BACKGROUND_OPACITY, backgroundSurfaceRules, currentSettingsPageKey } from './skin-engine.ts'
 import type { MySkinKey } from './locales.ts'
 import { PRESETS } from './presets.ts'
 import { TOKEN_CATALOG, TOKEN_GROUP_KEYS, type TokenGroup } from './token-catalog.ts'
@@ -571,7 +571,7 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
     const rules: string[] = []
     if (draft.canvas.background !== undefined && draft.canvas.background !== '') {
       rules.push('body { background-image: url("' + draft.canvas.background + '") !important; background-size: cover !important; background-position: center !important; }')
-      rules.push(...backgroundSurfaceRules(document))
+      rules.push(...backgroundSurfaceRules(document, draft.canvas.backgroundOpacity))
     }
     for (const { selector, rule } of draft.css) {
       if (selector !== '' && rule !== '') rules.push(selector + ' { ' + rule + ' }')
@@ -753,6 +753,17 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
         <Button style={btnBase} variant="ghost" icon={<IconClose size={16} />} onClick={onClose}>{t('close')}</Button>
       </div>
       <div ref={panelRef} data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', position: 'absolute', top: 'var(--dsh-myskin-inset-top, 48px)', right: 0, bottom: 0, width: 340, display: 'flex', flexDirection: 'column', gap: 12, overflow: 'auto', padding: 12, background: tok.bgOverlay, borderLeft: '1px solid ' + tok.borderL2, zIndex: 10004 }}>
+        {draft.canvas.background !== undefined && draft.canvas.background !== '' ? (
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: tok.labelSecondary }}>
+            <span>{t('backgroundOpacity')} · {Math.round((draft.canvas.backgroundOpacity ?? DEFAULT_BACKGROUND_OPACITY) * 100)}%</span>
+            <input
+              type="range" min={0.5} max={1} step={0.05}
+              value={draft.canvas.backgroundOpacity ?? DEFAULT_BACKGROUND_OPACITY}
+              onPointerDown={() => { snapshot() }}
+              onChange={(e) => { setDraft({ ...draft, canvas: { ...draft.canvas, backgroundOpacity: Number(e.target.value) } }) }}
+            />
+          </label>
+        ) : null}
           {mode === 'edit' ? (
             selected !== undefined ? (
               <Inspector target={selected} draft={draft} onSample={liveApply} onText={addText} onRemove={removeSelector} onEmbedOpacity={(id, v) => updateEmbed(id, { opacity: clampNum(v, 0, 1) })} onEmbedBlend={(id, v) => updateEmbed(id, { blend: v })} onRemoveEmbed={removeEmbed} onHide={hideElement} t={t} />

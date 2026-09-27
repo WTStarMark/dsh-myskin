@@ -83,6 +83,49 @@ test('dispose restores body.outerHTML byte-exactly and leaves no residue', async
   assert.equal(window.document.querySelector('#hero').textContent, 'Hello')
 })
 
+test('a background image softens ONLY the shell surface, never cards or menus', () => {
+  const window = setup()
+  window.document.body.style.backgroundColor = '#ffffff'
+  const before = window.document.body.outerHTML
+  const theme = fakeTheme()
+  const skin = {
+    enabled: true,
+    tokens: {},
+    css: [],
+    text: [],
+    canvas: { background: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=', backgroundOpacity: 0.8, images: [] },
+    layers: [],
+    library: [],
+  }
+  const override = engine.applySkin(theme, skin)
+  const css = window.document.getElementById('dsh-myskin-rule').textContent
+  assert.match(css, /--dsw-alias-bg-base: rgba\(255, 255, 255, 0\.8\)/)
+  assert.doesNotMatch(css, /--dsw-alias-bg-layer-1/)
+  assert.doesNotMatch(css, /--dsw-alias-bg-layer-2/)
+  assert.doesNotMatch(css, /--dsw-alias-bg-overlay/)
+  override.dispose()
+  assert.equal(window.document.body.outerHTML, before)
+})
+
+test('background strength 100% leaves every app surface untouched', () => {
+  const window = setup()
+  window.document.body.style.backgroundColor = '#ffffff'
+  const theme = fakeTheme()
+  const skin = {
+    enabled: true,
+    tokens: {},
+    css: [],
+    text: [],
+    canvas: { background: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=', backgroundOpacity: 1, images: [] },
+    layers: [],
+    library: [],
+  }
+  const override = engine.applySkin(theme, skin)
+  const css = window.document.getElementById('dsh-myskin-rule').textContent
+  assert.doesNotMatch(css, /--dsw-alias-bg-base:/)
+  override.dispose()
+})
+
 test('an empty skin is inert', () => {
   const window = setup()
   const before = window.document.body.outerHTML

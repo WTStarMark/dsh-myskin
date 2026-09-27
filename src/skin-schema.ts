@@ -87,7 +87,16 @@ export interface InjectedLayer {
 }
 
 /** Editor-only canvas layout. */
-export interface SkinCanvas { background?: string; images: EmbeddedImage[] }
+export interface SkinCanvas {
+  background?: string
+  /**
+   * How strongly the shell surface covers the background image (0..1). 1 leaves
+   * the app untouched; lower values show more of the image. Cards, menus and
+   * dialogs stay opaque either way. Absent means DEFAULT_BACKGROUND_OPACITY.
+   */
+  backgroundOpacity?: number
+  images: EmbeddedImage[]
+}
 /** One saved, named skin in the library. */
 export interface NamedSkin {
   id: string
