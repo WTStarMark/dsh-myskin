@@ -1,6 +1,7 @@
 /**
  * Skin data model — browser-safe (NO schemastery import). The schemastery
- * schema used for the Host settings register lives in `./host-schema.ts`.
+ * schemastery schema DSH 0.1.7 derives the settings form from lives in
+ * `./host-schema.ts` (exported as `Config`; the entry id is the namespace).
  *
  * A skin is an additive, reversible overlay over native DSH styling:
  *   - tokens: semantic --dsw-* values via the official ctx.theme registry.
