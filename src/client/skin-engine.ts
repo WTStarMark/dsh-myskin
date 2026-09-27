@@ -110,6 +110,28 @@ export function currentSettingsPageKey(doc: Document): string {
  * @param skin - the skin definition to apply.
  * @returns a `SkinOverride` whose `dispose` reverts every byte this call changed.
  */
+/**
+ * Rules that let a body background image show through DSH's opaque surfaces.
+ * DSH paints `--dsw-alias-bg-base` and the layer surfaces over <body>, so a
+ * background image alone is invisible: the base surface is made semi-transparent
+ * from its own computed colour. Shared by the applied skin and the editor preview
+ * so what you see while editing is what gets committed.
+ * @param doc - document to measure (the live page).
+ * @returns CSS rules, or an empty array when no colour could be measured.
+ */
+export function backgroundSurfaceRules(doc: Document): string[] {
+  const frame = doc.querySelector('[class*="_frame"]') as HTMLElement | null
+  const base = frame !== null ? getComputedStyle(frame).backgroundColor : getComputedStyle(doc.body).backgroundColor
+  const rgba = toRgba(base, 0.55)
+  if (rgba === '') return []
+  return [
+    'body { --dsw-alias-bg-base: ' + rgba + ' !important; }',
+    'body { --dsw-alias-bg-layer-1: ' + rgba + ' !important; }',
+    'body { --dsw-alias-bg-layer-2: ' + rgba + ' !important; }',
+    'body { --dsw-alias-bg-overlay: ' + rgba + ' !important; }',
+  ]
+}
+
 export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride {
   const cleanups: Array<() => void> = []
   // Set before the first cleanup runs: a queued MutationObserver microtask must
@@ -204,24 +226,10 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
 
   if (skin.canvas.background !== undefined && skin.canvas.background !== '') {
     rules.push(`body { background-image: url("${skin.canvas.background}") !important; background-size: cover !important; background-position: center !important; background-attachment: fixed !important; }`)
-    // DSH paints opaque surfaces over <body>, so also make the base surface (bg-base)
-    // semi-transparent so the image shows through.
-    if (typeof document !== 'undefined') {
-      const frame = document.querySelector('[class*="_frame"]') as HTMLElement | null
-      const base = frame !== null ? getComputedStyle(frame).backgroundColor : (getComputedStyle(document.body).backgroundColor)
-      const rgba = toRgba(base, 0.55)
-      if (rgba !== '') {
-        // Keep the var INSIDE the skin-owned <style> (removed on dispose) so we never
-        // touch <body>'s inline style. That is what keeps the skin byte-exact
-        // reversible — writing body.style + removeProperty leaves a stale `style=""`.
-        // Force the base surfaces semi-transparent with !important so the background
-        // image shows through even when the skin's own tokens set them opaque.
-        rules.push(`body { --dsw-alias-bg-base: ${rgba} !important; }`)
-        rules.push(`body { --dsw-alias-bg-layer-1: ${rgba} !important; }`)
-        rules.push(`body { --dsw-alias-bg-layer-2: ${rgba} !important; }`)
-        rules.push(`body { --dsw-alias-bg-overlay: ${rgba} !important; }`)
-      }
-    }
+    // DSH paints opaque surfaces over <body>, so also make the base surfaces
+    // semi-transparent (kept INSIDE the skin-owned <style>, removed on dispose, so
+    // <body>'s inline style is never touched and the skin stays byte-reversible).
+    if (typeof document !== 'undefined') rules.push(...backgroundSurfaceRules(document))
   }
   for (const { selector, rule } of skin.css) {
     if (selector !== '' && rule !== '') rules.push(`${selector} { ${rule} }`)

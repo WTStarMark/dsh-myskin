@@ -18,7 +18,7 @@ import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { parseSkin, EMPTY_SKIN, type BlendMode, type EmbeddedImage, type NamedSkin, type SkinSettings, type TokenOverrides } from '../skin-schema.ts'
-import { currentSettingsPageKey } from './skin-engine.ts'
+import { backgroundSurfaceRules, currentSettingsPageKey } from './skin-engine.ts'
 import type { MySkinKey } from './locales.ts'
 import { PRESETS } from './presets.ts'
 import { TOKEN_CATALOG, TOKEN_GROUP_KEYS, type TokenGroup } from './token-catalog.ts'
@@ -149,13 +149,13 @@ function closeSkinEditor(): void {
   editorHost.container.remove()
   editorHost = undefined
 }
-function openSkinEditor(initial: SkinSettings, t: (k: MySkinKey) => string, onCommit: (next: SkinSettings) => void, onClose: () => void): void {
+function openSkinEditor(initial: SkinSettings, t: (k: MySkinKey) => string, onCommit: (next: SkinSettings) => Promise<boolean>, onClose: () => void): void {
   closeSkinEditor()
   const container = document.createElement('div')
   document.body.appendChild(container)
   editorHost = { root: createRoot(container), container }
   editorHost.root.render(
-    <SkinCanvas initial={initial} t={t} onCommit={(next) => { onCommit(next); closeSkinEditor() }} onClose={() => { onClose(); closeSkinEditor() }} />,
+    <SkinCanvas initial={initial} t={t} onCommit={async (next) => { const ok = await onCommit(next); if (ok) closeSkinEditor(); return ok }} onClose={() => { onClose(); closeSkinEditor() }} />,
   )
 }
 
@@ -198,9 +198,21 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
     return () => { unsub() }
   }, [scope])
 
-  const update = (next: SkinSettings): void => {
+  /**
+   * Persist the document and report whether the Host accepted every field.
+   * @param next - the skin document to store.
+   * @returns true when all fields were accepted.
+   */
+  const persistNow = async (next: SkinSettings): Promise<boolean> => {
     setSkin(parseSkin(next))
-    void persist(scope, next).catch(() => { setNotice('save failed') })
+    try {
+      const accepted = await persist(scope, next)
+      return accepted.every((ok) => ok)
+    } catch { return false }
+  }
+
+  const update = (next: SkinSettings): void => {
+    void persistNow(next).then((ok) => { if (!ok) setNotice('save failed') })
   }
 
   const applyNow = (): void => {
@@ -330,7 +342,7 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
       </div>
 
       <div style={lastRowStyle}>
-        <Button style={btnBase} variant="outline" icon={<IconPersonalization size={16} />} onClick={() => { openSkinEditor(skin, t, (next) => update(next), () => {}) }}>{t('edit')}</Button>
+        <Button style={btnBase} variant="outline" icon={<IconPersonalization size={16} />} onClick={() => { close?.(); openSkinEditor(skin, t, (next) => persistNow(next), () => {}) }}>{t('edit')}</Button>
         <Button style={btnBase} variant="outline" onClick={onPreview}>{t('preview')}</Button>
         <Button style={btnBase} onClick={applyNow}>{t('apply')}</Button>
         <Button style={btnBase} variant="ghost" onClick={reset}>{t('reset')}</Button>
@@ -392,10 +404,47 @@ function SkinToggle({ checked, onChange, status }: { checked: boolean; onChange:
   )
 }
 
+/** Longest edge a stored skin image is downscaled to (keeps the settings document small). */
+const MAX_IMAGE_EDGE = 2048
+
+/**
+ * Read an image file as a data URL, downscaling anything larger than
+ * {@link MAX_IMAGE_EDGE}. The document is written to the profile patch and
+ * re-sent on every edit, so an untouched 8 MB photo would make every save slow.
+ * @param file - the picked image file.
+ * @returns the data URL to store ('' when the file could not be read).
+ */
+function readImageFile(file: File): Promise<string> {
+  return new Promise((resolve) => {
+    const reader = new FileReader()
+    reader.onerror = () => resolve('')
+    reader.onload = () => {
+      const url = String(reader.result ?? '')
+      if (url === '') { resolve(''); return }
+      const image = new Image()
+      image.onerror = () => resolve(url)
+      image.onload = () => {
+        const edge = Math.max(image.naturalWidth, image.naturalHeight)
+        if (edge <= MAX_IMAGE_EDGE || typeof document === 'undefined') { resolve(url); return }
+        const scale = MAX_IMAGE_EDGE / edge
+        const target = document.createElement('canvas')
+        target.width = Math.max(1, Math.round(image.naturalWidth * scale))
+        target.height = Math.max(1, Math.round(image.naturalHeight * scale))
+        const context = target.getContext('2d')
+        if (context === null) { resolve(url); return }
+        context.drawImage(image, 0, 0, target.width, target.height)
+        try { resolve(target.toDataURL('image/webp', 0.9)) } catch { resolve(url) }
+      }
+      image.src = url
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
 interface CanvasProps {
   initial: SkinSettings
   onClose: () => void
-  onCommit: (next: SkinSettings) => void
+  onCommit: (next: SkinSettings) => Promise<boolean>
   t: (key: MySkinKey) => string
 }
 
@@ -409,8 +458,6 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
   const embedBgRef = useRef<HTMLInputElement | null>(null)
   const pageBgRef = useRef<HTMLInputElement | null>(null)
   const [, bump] = useState(0)
-  const [iframeDoc, setIframeDoc] = useState<Document | undefined>(undefined)
-  const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const liveStyleRef = useRef<HTMLStyleElement | null>(null)
 
   // Undo/redo history (deep-copied snapshots).
@@ -449,28 +496,41 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
     return () => { window.removeEventListener('scroll', onMove, true); window.removeEventListener('resize', onMove) }
   }, [])
 
-    // Capture clicks inside the editor iframe to select/deselect elements and stop the
-  // app from reacting while editing.
+  // Capture gestures on the REAL page while in edit mode. The overlay itself is
+  // pointer-events:none, so the app underneath stays visible, scrollable and
+  // hoverable; we intercept in the capture phase and select the element instead.
+  // Our own panels carry data-dsh-myskin-ui="1" and always pass through.
   useEffect(() => {
-    if (iframeDoc === undefined) return
-    const handler = (e: MouseEvent): void => {
-      if (mode !== 'edit') return
+    if (mode !== 'edit') return
+    const own = (target: EventTarget | null): boolean =>
+      target instanceof Element && target.closest('[data-dsh-myskin-ui="1"]') !== null
+    const onPointerDown = (e: Event): void => {
+      if (own(e.target)) return
+      e.preventDefault()
+      e.stopPropagation()
+    }
+    const onClick = (e: MouseEvent): void => {
+      if (own(e.target)) return
       e.preventDefault()
       e.stopPropagation()
       liveApplyRef.current = false
       setSelected(hitTest(e.clientX, e.clientY))
-      setSelected(hitTest(e.clientX, e.clientY))
     }
-    iframeDoc.addEventListener('click', handler, true)
-    return () => { iframeDoc.removeEventListener('click', handler, true) }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    document.addEventListener('click', onClick, true)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      document.removeEventListener('click', onClick, true)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [iframeDoc, mode])
+  }, [mode])
 
   // Live CSS + background preview: an owned style tag over the real DOM.
   useEffect(() => {
     const rules: string[] = []
     if (draft.canvas.background !== undefined && draft.canvas.background !== '') {
       rules.push('body { background-image: url("' + draft.canvas.background + '") !important; background-size: cover !important; background-position: center !important; }')
+      rules.push(...backgroundSurfaceRules(document))
     }
     for (const { selector, rule } of draft.css) {
       if (selector !== '' && rule !== '') rules.push(selector + ' { ' + rule + ' }')
@@ -482,8 +542,7 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
         rules.push(img.selector + '::after { content: ""; position: absolute; inset: 0; background-image: url("' + img.url + '"); background-repeat: no-repeat; background-position: ' + img.x + 'px ' + img.y + 'px; background-size: ' + img.w + 'px ' + img.h + 'px; opacity: ' + (img.opacity ?? 1) + '; pointer-events: none; z-index: 1;' + blendCss + ' }')
       }
     }
-    const d = iframeDoc
-    if (d === undefined) return
+    const d = document
     if (rules.length > 0) {
       if (liveStyleRef.current === null) {
         const tag = d.createElement('style')
@@ -497,14 +556,13 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
       liveStyleRef.current.remove()
       liveStyleRef.current = null
     }
-  }, [draft.css, draft.canvas.background, draft.canvas.images, iframeDoc])
+  }, [draft.css, draft.canvas.background, draft.canvas.images])
 
   // Remove the live style tag on unmount.
   useEffect(() => () => { if (liveStyleRef.current !== null) { liveStyleRef.current.remove(); liveStyleRef.current = null } }, [])
 
   const hitTest = (clientX: number, clientY: number): Element | undefined => {
-    const d = iframeDoc
-    if (d === undefined) return undefined
+    const d = document
     const excluded = (el: Element): boolean =>
       el.getAttribute('data-dsh-myskin-ui') === '1'
       || el.closest('[data-dsh-myskin-ui="1"]') !== null
@@ -518,12 +576,6 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
       return el
     }
     return undefined
-  }
-
-  const onCanvasClick = (e: MouseEvent): void => {
-    if (e.target !== e.currentTarget) return
-    liveApplyRef.current = false
-    setSelected(hitTest(e.clientX, e.clientY))
   }
 
   const applyStyle = (selector: string, declaration: string): void => {
@@ -558,34 +610,31 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
 
   const onEmbedBgFile = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const file = e.target.files?.[0]
+    e.target.value = ''
     if (file === undefined) return
-    const reader = new FileReader()
-    reader.onload = () => {
-        const url = String(reader.result ?? '')
-      if (selected === undefined) {
-        setHint(t('selectFirst'))
-        return
-      }
+    if (selected === undefined) {
+      setHint(t('selectFirst'))
+      return
+    }
+    const target = selected
+    void readImageFile(file).then((url) => {
+      if (url === '') { setHint(t('applyFailed')); return }
       snapshot()
       const id = 'embed-' + Date.now() + '-' + Math.floor(Math.random() * 1000)
-      selected.setAttribute('data-dsh-myskin-embed', id)
-      const img: EmbeddedImage = { id, selector: '[data-dsh-myskin-embed="' + id + '"]', fallbackSelector: selectorOf(selected), url, x: 0, y: 0, w: 320, h: 200, opacity: 0.9, pageKey: currentSettingsPageKey(selected.ownerDocument) }
+      target.setAttribute('data-dsh-myskin-embed', id)
+      const img: EmbeddedImage = { id, selector: '[data-dsh-myskin-embed="' + id + '"]', fallbackSelector: selectorOf(target), url, x: 0, y: 0, w: 320, h: 200, opacity: 0.9, pageKey: currentSettingsPageKey(target.ownerDocument) }
       setDraft({ ...draft, canvas: { ...draft.canvas, images: [...draft.canvas.images, img] } })
-    }
-    reader.readAsDataURL(file)
-    e.target.value = ''
+    })
   }
   const onPageBgFile = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const file = e.target.files?.[0]
+    e.target.value = ''
     if (file === undefined) return
-    const reader = new FileReader()
-    reader.onload = () => {
-      const url = String(reader.result ?? '')
+    void readImageFile(file).then((url) => {
+      if (url === '') { setHint(t('applyFailed')); return }
       snapshot()
       setDraft({ ...draft, canvas: { ...draft.canvas, background: url } })
-    }
-    reader.readAsDataURL(file)
-    e.target.value = ''
+    })
   }
   const clearPageBg = (): void => {
     snapshot()
@@ -633,15 +682,17 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
   }
 
   const resetDraft = (): void => { snapshot(); setDraft(parseSkin(EMPTY_SKIN)); setSelected(undefined) }
-  const onApply = (): void => { onCommit({ ...draft, enabled: true }) }
+  const onApply = (): void => {
+    setHint(undefined)
+    void onCommit({ ...draft, enabled: true }).then((ok) => { if (!ok) setHint(t('applyFailed')) })
+  }
   const toggleMode = (): void => { setMode(mode === 'edit' ? 'interact' : 'edit') }
 
-  const selRect = selected !== undefined ? selected.getBoundingClientRect() : null
-  const iframeBox = iframeRef.current !== null ? iframeRef.current.getBoundingClientRect() : { left: 0, top: 0 }
+  const selRect = selected !== undefined && selected.isConnected ? selected.getBoundingClientRect() : null
 
   return (
-    <div data-dsh-myskin-ui="1" data-dsh-myskin-canvas="1" style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', flexDirection: 'column', background: 'var(--dsw-alias-bg-overlay)', color: tok.labelPrimary }}>
-      <div data-dsh-myskin-ui="1" style={{ flex: 'none', minHeight: 48, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 16px', background: tok.bgOverlay, borderBottom: '1px solid var(--dsw-alias-border-l1)', zIndex: 10005, color: tok.labelPrimary }}>
+    <div data-dsh-myskin-ui="1" data-dsh-myskin-canvas="1" style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', flexDirection: 'column', pointerEvents: 'none', color: tok.labelPrimary }}>
+      <div data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', flex: 'none', minHeight: 48, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 16px', background: tok.bgOverlay, borderBottom: '1px solid var(--dsw-alias-border-l1)', zIndex: 10005, color: tok.labelPrimary }}>
         <IconPersonalization size={16} />
         <span style={{ fontSize: 14, lineHeight: '22px', fontWeight: 500 }}>{t('title')} — {t('edit')}</span>
         <span style={{ flex: 1 }} />
@@ -654,14 +705,15 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
         {draft.canvas.background !== undefined && draft.canvas.background !== '' ? (
           <Button style={btnBase} size="sm" variant="ghost" onClick={clearPageBg}>{t('clearBackground')}</Button>
         ) : null}
-        {hint !== undefined ? <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{hint}</span> : null}
+        <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{mode === 'edit' ? t('editHint') : t('interactHint')}</span>
+        {hint !== undefined ? <span style={{ fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-primary)' }}>{hint}</span> : null}
         <Button style={btnBase} onClick={onApply}>{t('apply')}</Button>
         <Button style={btnBase} variant="ghost" icon={<IconTrash size={16} />} onClick={resetDraft}>{t('reset')}</Button>
         <Button style={btnBase} variant="ghost" icon={<IconClose size={16} />} onClick={onClose}>{t('close')}</Button>
       </div>
-      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        <iframe ref={iframeRef} src={location.href} onLoad={() => { setIframeDoc(iframeRef.current?.contentDocument) }} style={{ flex: 1, border: 'none', background: 'transparent' }} />
-        <div data-dsh-myskin-ui="1" style={{ flex: 'none', width: 340, overflow: 'auto', padding: 12, background: tok.bgOverlay, borderLeft: '1px solid ' + tok.borderL2, zIndex: 10004 }}>
+      <div style={{ display: 'flex', flex: 1, minHeight: 0, pointerEvents: 'none' }}>
+        <div style={{ flex: 1 }} />
+        <div data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', flex: 'none', width: 340, overflow: 'auto', padding: 12, background: tok.bgOverlay, borderLeft: '1px solid ' + tok.borderL2, zIndex: 10004 }}>
           {mode === 'edit' ? (
             selected !== undefined ? (
               <Inspector target={selected} draft={draft} onSample={liveApply} onText={addText} onRemove={removeSelector} onEmbedOpacity={(id, v) => updateEmbed(id, { opacity: clampNum(v, 0, 1) })} onEmbedBlend={(id, v) => updateEmbed(id, { blend: v })} onRemoveEmbed={removeEmbed} onHide={hideElement} t={t} />
@@ -676,13 +728,13 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
       <input ref={embedBgRef} type="file" accept="image/*" multiple={false} style={{ display: 'none' }} onChange={onEmbedBgFile} />
       <input ref={pageBgRef} type="file" accept="image/*" multiple={false} style={{ display: 'none' }} onChange={onPageBgFile} />
       {mode === 'edit' && selRect !== null ? (
-        <div data-dsh-myskin-ui="1" style={{ position: 'fixed', left: iframeBox.left + selRect.left, top: iframeBox.top + selRect.top, width: selRect.width, height: selRect.height, border: '2px solid ' + tok.brand, boxShadow: '0 0 0 1px var(--dsw-alias-bg-overlay)', borderRadius: 2, pointerEvents: 'none', zIndex: 10001 }} />
+        <div data-dsh-myskin-ui="1" style={{ position: 'fixed', left: selRect.left, top: selRect.top, width: selRect.width, height: selRect.height, border: '2px solid ' + tok.brand, boxShadow: '0 0 0 1px var(--dsw-alias-bg-overlay)', borderRadius: 2, pointerEvents: 'none', zIndex: 10001 }} />
       ) : null}
       {draft.canvas.images.map((img) => {
-        const container = (iframeDoc ?? document).querySelector(img.selector) as HTMLElement | null
+        const container = document.querySelector(img.selector) as HTMLElement | null
         const crect = container !== null ? container.getBoundingClientRect() : null
         if (crect === null) return null
-        const zx = iframeBox.left + crect.left + (img.x || 0), zy = iframeBox.top + crect.top + (img.y || 0)
+        const zx = crect.left + (img.x || 0), zy = crect.top + (img.y || 0)
         return (
           <Fragment key={img.id}>
             <div data-dsh-myskin-ui="1" onPointerDown={(e) => { onEmbedPointerDown(e, img) }} onClick={(e) => { e.stopPropagation() }}

@@ -17,7 +17,9 @@ DSH ≥0.1.7 移除了命令式 `settings.register(ns, schema)`。本包随之�
 - `src/client/index.ts` —— 浏览器半区：`configForms.whileServed` 绑定命名空间 + 实时皮肤生命周期。
 - `src/client/skin-engine.ts` —— 可逆应用引擎（官方令牌通道 + 皮肤自有 `<style>` + 真实节点图层注入 + 文本替换）。
 - `src/client/icons.ts` —— 图标候选表（跨 0.1.6/0.1.7 两代命名，缺失时降级为空渲染）。
-- `src/client/MySkinSection.tsx` —— 设置页 + 画布编辑器（透明覆盖真实 DSH DOM + 实时预览）。
+- `src/client/MySkinSection.tsx` —— 设置页 + 画布编辑器。绘制模式会先关闭设置弹窗，再以透明覆盖层盖在**真实页面**上：编辑模式点击即选中元素，交互模式可正常滚动/操作；实时预览直接作用在真实页面上。
+  - 背景图/嵌入图在提交前会按最长边 2048 自动降采样为 WebP（设置文档写进 profile patch，原图会让每次保存都变慢）。
+  - 「应用」只在 Host 接受全部字段后才关闭编辑器；失败会在工具栏就地提示。
 
 ## 构建 / 测试 / 自检
 

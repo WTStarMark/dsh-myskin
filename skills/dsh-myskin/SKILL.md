@@ -42,6 +42,14 @@ DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设
 - **Host 侧调用**：`ctx.settings.describe()` 列出所有条目的 `value`/`base`/`user`/`revision`；`ctx.settings.update(ns, patch)`、`replace(ns, section)`、`mutate(ns, ops)` 写入（带 `expectedRevision` 做冲突保护）。注意 0.1.7 的 `SettingsForms` **没有 `settings.get()`**，读取一律走 `describe()`。
 - **直接看/改文档**：`$DSH_HOME/profiles/<profile>/cordis.patch.yml` 里 `id: dsh-myskin` 那一条的 `config`。手改前先备份、先 read；YAML 注释与格式会被 DSH 的写入保留。
 
+## 3.5 画布编辑器流程（0.2 起）
+
+1. 设置 →「皮肤管理」→ **绘制模式**：先关闭设置弹窗，再以全屏透明覆盖层盖在真实页面上（不再用 iframe 复制一份应用）。
+2. **编辑**模式：点击页面任意元素即选中（不会触发原按钮）；**交互**模式：覆盖层不拦截事件，可正常滚动/使用应用。
+3. 背景图 = 直接选文件；嵌入图片 = 先选中一个容器，再选文件；拖拽/缩放手柄调整。
+4. **应用** → 写入 `dsh-myskin` 条目；Host 接受全部字段才关闭编辑器，失败会就地提示（图片过大/连接中断）。
+5. 上传图片会自动降采样（最长边 2048 / WebP 0.9），避免设置文档过大。
+
 ## 4. 运行时应用生命周期
 
 `applySkin(theme, skin)`（`src/client/skin-engine.ts`）按序应用：
