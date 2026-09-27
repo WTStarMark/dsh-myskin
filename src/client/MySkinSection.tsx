@@ -525,6 +525,47 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode])
 
+  // Docked layout: while the editor is open the REAL page is INSET (body
+  // margin + height) instead of being covered — the app keeps its own area,
+  // scrollbars and hover behaviour, and no panel sits on top of it. The two
+  // measures come from ResizeObserver so a toolbar that wraps on a narrow window
+  // still fits. Everything added here is removed on unmount.
+  const barRef = useRef<HTMLDivElement | null>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const root = document.documentElement
+    const priorStyle = root.getAttribute('style')
+    const tag = document.createElement('style')
+    tag.id = 'dsh-myskin-frame'
+    tag.textContent = [
+      'body {',
+      '  margin-top: var(--dsh-myskin-inset-top, 48px) !important;',
+      '  margin-right: var(--dsh-myskin-inset-right, 340px) !important;',
+      '  height: calc(100vh - var(--dsh-myskin-inset-top, 48px)) !important;',
+      '}',
+      '#root { height: 100% !important; }',
+    ].join(String.fromCharCode(10))
+    document.head.appendChild(tag)
+    const measure = (): void => {
+      const bar = barRef.current
+      const panel = panelRef.current
+      root.style.setProperty('--dsh-myskin-inset-top', Math.round(bar === null ? 48 : bar.getBoundingClientRect().height) + 'px')
+      root.style.setProperty('--dsh-myskin-inset-right', Math.round(panel === null ? 340 : panel.getBoundingClientRect().width) + 'px')
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    if (barRef.current !== null) observer.observe(barRef.current)
+    if (panelRef.current !== null) observer.observe(panelRef.current)
+    window.addEventListener('resize', measure)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', measure)
+      tag.remove()
+      if (priorStyle === null) root.removeAttribute('style')
+      else root.setAttribute('style', priorStyle)
+    }
+  }, [])
+
   // Live CSS + background preview: an owned style tag over the real DOM.
   useEffect(() => {
     const rules: string[] = []
@@ -691,8 +732,8 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
   const selRect = selected !== undefined && selected.isConnected ? selected.getBoundingClientRect() : null
 
   return (
-    <div data-dsh-myskin-ui="1" data-dsh-myskin-canvas="1" style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', flexDirection: 'column', pointerEvents: 'none', color: tok.labelPrimary }}>
-      <div data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', flex: 'none', minHeight: 48, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 16px', background: tok.bgOverlay, borderBottom: '1px solid var(--dsw-alias-border-l1)', zIndex: 10005, color: tok.labelPrimary }}>
+    <div data-dsh-myskin-ui="1" data-dsh-myskin-canvas="1" style={{ position: 'fixed', inset: 0, zIndex: 9999, pointerEvents: 'none', color: tok.labelPrimary }}>
+      <div ref={barRef} data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', position: 'absolute', top: 0, left: 0, right: 0, minHeight: 48, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 16px', background: tok.bgOverlay, borderBottom: '1px solid var(--dsw-alias-border-l1)', zIndex: 10005, color: tok.labelPrimary }}>
         <IconPersonalization size={16} />
         <span style={{ fontSize: 14, lineHeight: '22px', fontWeight: 500 }}>{t('title')} — {t('edit')}</span>
         <span style={{ flex: 1 }} />
@@ -711,9 +752,7 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
         <Button style={btnBase} variant="ghost" icon={<IconTrash size={16} />} onClick={resetDraft}>{t('reset')}</Button>
         <Button style={btnBase} variant="ghost" icon={<IconClose size={16} />} onClick={onClose}>{t('close')}</Button>
       </div>
-      <div style={{ display: 'flex', flex: 1, minHeight: 0, pointerEvents: 'none' }}>
-        <div style={{ flex: 1 }} />
-        <div data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', flex: 'none', width: 340, overflow: 'auto', padding: 12, background: tok.bgOverlay, borderLeft: '1px solid ' + tok.borderL2, zIndex: 10004 }}>
+      <div ref={panelRef} data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', position: 'absolute', top: 'var(--dsh-myskin-inset-top, 48px)', right: 0, bottom: 0, width: 340, display: 'flex', flexDirection: 'column', gap: 12, overflow: 'auto', padding: 12, background: tok.bgOverlay, borderLeft: '1px solid ' + tok.borderL2, zIndex: 10004 }}>
           {mode === 'edit' ? (
             selected !== undefined ? (
               <Inspector target={selected} draft={draft} onSample={liveApply} onText={addText} onRemove={removeSelector} onEmbedOpacity={(id, v) => updateEmbed(id, { opacity: clampNum(v, 0, 1) })} onEmbedBlend={(id, v) => updateEmbed(id, { blend: v })} onRemoveEmbed={removeEmbed} onHide={hideElement} t={t} />
@@ -723,7 +762,9 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
           ) : (
             <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{t('interactHint')}</span>
           )}
-        </div>
+        {mode === 'edit' && showTokens ? (
+          <TokenPanel tokens={draft.tokens} onToggle={toggleToken} onChange={setToken} t={t} />
+        ) : null}
       </div>
       <input ref={embedBgRef} type="file" accept="image/*" multiple={false} style={{ display: 'none' }} onChange={onEmbedBgFile} />
       <input ref={pageBgRef} type="file" accept="image/*" multiple={false} style={{ display: 'none' }} onChange={onPageBgFile} />
@@ -750,11 +791,6 @@ function SkinCanvas({ initial, onClose, onCommit, t }: CanvasProps): ReactNode {
           </Fragment>
         )
       })}
-      {mode === 'edit' && showTokens ? (
-        <div data-dsh-myskin-ui="1" style={{ position: 'fixed', bottom: 16, left: 16, zIndex: 10004, pointerEvents: 'auto' }}>
-          <TokenPanel tokens={draft.tokens} onToggle={toggleToken} onChange={setToken} t={t} />
-        </div>
-      ) : null}
     </div>
   )
 }
