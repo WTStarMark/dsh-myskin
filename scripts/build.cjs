@@ -56,6 +56,16 @@ const clientOptions = {
   logLevel: 'warning',
 }
 
+// The host half bundles its ONE dependency (schemastery) instead of leaving it
+// external. A profile install that only links/copies this folder (a zip extract,
+// or the "link:" route the README used to recommend) has no node_modules of its
+// own, so an external import made the Loader report
+//   "dsh-myskin (dsh-myskin): failed to import"
+// (app-boot records fiber === undefined as the literal 'failed to import' and
+// swallows ERR_MODULE_NOT_FOUND). Bundling is safe: cordis validates a plugin's
+// Config through the Standard Schema protocol (Config["~standard"].validate) and
+// Symbol.for('cordis.resolveConfig'), both structural, so a second schemastery
+// instance is not an identity problem.
 const hostOptions = {
   entryPoints: [path.join(root, 'src', 'index.ts')],
   bundle: true,
@@ -63,7 +73,6 @@ const hostOptions = {
   platform: 'node',
   target: 'es2024',
   outfile: path.join(root, 'lib', 'index.js'),
-  external: ['@deepseek-ai/schemastery'],
   logLevel: 'warning',
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "dsh-myskin",
-  "description": "DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设置页。非侵入式、可逆覆盖层；适配 DSH 0.1.7-rc.2（Web 与 Desktop 共用同一条客户端插件管线）。",
-  "version": "0.2.0",
+  "description": "DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设置页。非侵入式、可逆覆盖层；适配 DSH 0.1.7-rc.2 / 0.2.0-rc.1（Web 与 Desktop 共用同一条客户端插件管线）。",
+  "version": "0.3.6",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -33,19 +33,23 @@
     "bundle": "node scripts/build.cjs",
     "watch": "node scripts/build.cjs --watch",
     "test": "node --test tests/*.test.mjs",
-    "check:compat": "node scripts/check-compat.mjs"
+    "check:compat": "node scripts/check-compat.mjs",
+    "check:types": "node scripts/check-types.mjs"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "~3.18.4"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/dsh": "^0.1.7-rc.2"
+    "@deepseek-ai/dsh": ">=0.1.7-rc.2 <0.3.0"
   },
   "devDependencies": {
     "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.0",
     "esbuild": "^0.25.0",
     "jsdom": "^25.0.0",
-    "react": "^18.2.0"
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "typescript": "~5.9.0"
   }
 }
