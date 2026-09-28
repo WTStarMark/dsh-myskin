@@ -1,0 +1,16 @@
+# Keep every checkout byte-identical across platforms: lib/ is committed and the
+# released archives are hash-pinned, so line endings must not drift. Windows
+# contributors: this also stops core.autocrlf from rewriting the tracked tree.
+* text=auto eol=lf
+
+# Binary payloads are never line-ending converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.tgz binary
