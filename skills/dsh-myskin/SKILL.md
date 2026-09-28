@@ -6,7 +6,8 @@ description: DSH Web/Desktop 皮肤插件（dsh-myskin）的功能与设置说�
 # dsh-myskin 配置技能（功能 + 详细指向）
 
 > 本技能**只陈述 dsh-myskin 的功能与详细指向**，不做美化/配色指导。
-> 适配版本：**DSH 0.1.7-rc.2**（Web 与 Desktop 同一套客户端插件管线）。
+> 适配版本：**DSH 0.1.7-rc.2 与 0.2.0-rc.1**（包版本 0.3.6；Web 与 Desktop 同一套客户端插件管线；
+> 桌面壳按上游 `data-platform` / `data-windows-titlebar` 契约适配，见 `src/client/desktop.ts`）。
 
 ## 1. 项目是什么
 
@@ -45,6 +46,9 @@ DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设
 ## 3.5 画布编辑器流程（0.2 起）
 
 1. 设置 →「皮肤管理」→ **绘制模式**：先关闭设置弹窗，再把真实页面**内缩**——顶部工具条与右侧 340px 面板各占自己的位置，不覆盖 DSH 界面（不再用 iframe 复制一份应用）。退出编辑器自动还原页面布局。
+   - **桌面端**：工具条让开 Windows 原生标题栏 / macOS 红绿灯（全屏时红绿灯隐藏、留白收窄），页面内缩改加在 frame 的标题栏内边距上；开/关编辑器后补发上游 `data-window-drag-recall` 脉冲，避免 macOS 窗口拖拽矩形停留在旧几何。2. **元素操作**（右侧面板，「元素操作」一节）：**编辑文字**（自动定位承载文字的节点，画布内即时生效；`text` 字段）、**隐藏控件**（`visibility: hidden !important`，保留占位）、**移除控件**（`display: none !important`，不占位）、**清除该元素自定义**。隐藏/移除按**属性合并**进已有规则，不解构其它自定义；都是纯 CSS，**不删真实 DOM**（避免 React 卸载崩溃）。三者都可一键撤销（取消隐藏 / 恢复显示 / 还原文字）。
+3. **保存**：工具条显示保存状态（有未保存的更改 / 保存中 / 已保存 / 保存失败：<字段名>）；点 ✕ 关闭会先自动保存，失败则保留编辑器并列出被 Host 拒绝的字段。`ConfigForm.set` 对非 volatile 路径或 schema 不匹配会返回 false，以前被压成一个布尔值，现在按字段报出来。
+4. **背景图体积**：壁纸按最长边 1600 / WebP 0.85 压缩，data URL 超 1.5 MB 逐级降到 1280/960，仍超标就拒收并提示（设置文档每次编辑都整份重发，大图是「保存失败」的常见原因）。桌面端会清掉 `frame` 自身那层不透明底色，否则壁纸被整块盖住、看起来像「加载不了背景图」。
 2. **编辑**模式：点击页面任意元素即选中（不会触发原按钮）；**交互**模式：覆盖层不拦截事件，可正常滚动/使用应用。
 3. 背景图 = 直接选文件；嵌入图片 = 先选中一个容器，再选文件；拖拽/缩放手柄调整。
 4. **应用** → 写入 `dsh-myskin` 条目；Host 接受全部字段才关闭编辑器，失败会就地提示（图片过大/连接中断）。
@@ -70,11 +74,15 @@ DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设
 - `src/host-schema.ts` — schemastery 文档 schema（顶层字段全部 `.volatile()`）。
 - `src/skin-schema.ts` — 数据模型（`SkinSettings`、`cloneSkin`/`parseSkin`）。
 - `src/client/index.ts` — 浏览器半区：`configForms.whileServed` + 实时皮肤生命周期。
-- `src/client/skin-engine.ts` — 可逆应用引擎。
+- `src/client/skin-engine.ts` — 可逆应用引擎（含透明桌面壳的 frame 着色兜底 `desktopFrameTint`）。
+- `src/client/desktop.ts` — 桌面壳适配（`data-platform` / `data-fullscreen` / `data-windows-titlebar` 检测、编辑器 chrome 规则、拖拽 recall 脉冲）。
 - `src/client/icons.ts` — 图标候选表（0.1.7 把 `...16` 改名为 `...Regular`/`Medium`）。
 - `src/client/MySkinSection.tsx` — 「皮肤管理」设置页 + 画布编辑器。
 - `src/client/presets.ts` / `token-catalog.ts` / `locales.ts` — 预设 / 令牌目录 / 文案。
-- `scripts/build.cjs` / `check-compat.mjs` / `tests/` — 构建 / 兼容自检 / 测试。
+- `scripts/build.cjs` / `check-compat.mjs` / `check-types.mjs` / `tests/` — 构建 / 字符串级兼容自检 / 类型级兼容自检（拿真实安装的 `.d.ts` 编译 `src/`）/ 测试。
+- 类型级 API 依赖一处上游惯例：`ctx.slots` 的类型来自 `@deepseek-ai/dsh-client-ui-renderer/client` 的 **type-only import**（`src/client/index.ts` 里那行），缺少它 `tsc` 会报 `Property 'slots' does not exist on type 'Context'`；它是纯类型导入，不进运行时代码。
+- `export const inject` 是**激活门禁**：只列真正使用的服务（现为 `slots` / `locale` / `configForms` / `theme`）。曾经多列的 `connection` / `remote` 已删除——上游改名会让客户端半区永久 pending、设置页静默消失。改这个数组后请跑 `npm run check:types`（`tests/types/inject-services.ts` 会逐个服务名把关）。
+- `npm install` 在 `NODE_ENV=production` 下会清掉 devDependencies（npm `omit=dev`）：装依赖请用 `npm install --include=dev`。
 
 ## 6. 皮肤库 & 导入/导出
 
@@ -106,4 +114,9 @@ DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设
 - `layers` 的 `selector` 应指向安全容器（`body` 或非 React 映射列表的普通包装 `:scope > div`），别插进 React 管理的映射列表中间；`content.workspaceTree` 走内置装饰器（不注入节点，React 安全）。
 - **皮肤不生效/回退默认**：看 console 是否报错；看有无 `<style id="dsh-myskin-rule">`；确认该 profile 的插件条目真的被服务（`settings describe` 里应出现 `dsh-myskin`）。
 - **导入/加载会整体替换文档**：先「导出皮肤」备份，否则当前壁纸与皮肤库会被覆盖。
-- **背景强度滑块**：拖动即时预览、松手 400ms 自动保存，不需要点「应用」。
+- **背景强度滑块**：拖动即时预览、松手 400ms 自动保存，不需要点「应用」。macOS 桌面窗口透明（原生 vibrancy），没有元素画 `bg-base`，此时强度值改为铺在 frame 自身上；Windows 标题栏取色跟随 `--dsw-specific-sidebar-fill`，改这个令牌原生标题栏会跟着变。
+- **启动报 `dsh-myskin (dsh-myskin): failed to import`**：app-boot 把 Loader「没拿到 fiber」记成字面量，真实异常被吞。0.3.1 起 `lib/index.js` 自带 schemastery（不再 external），解压/`link:`/拷贝这类没有 node_modules 的装法也能导入；旧包在该装法下必然失败。定位命令：`node --input-type=module -e "await import('<pkg>/lib/index.js')"`（能打印 `Config,apply,name` 即宿主半区没问题）。
+- **选择器必须在 portal 里也能匹配**：设置面板/菜单/弹窗是 `createPortal(…, document.body)`（在 `#root` 之外）。选择器统一由 `skin-engine.ts` 的 `selectorOf()` 生成（`#root` 内用 `#root > …`；portal 内优先 `[data-shortcut-modal]…`/`[role="dialog"…]`，最后 `body > …`）。自己拼选择器时若以 `#root` 打头去指设置页里的元素，规则会静默失效。
+- **隐藏 vs 移除**：隐藏 = `visibility: hidden !important`（保留占位）；移除 = `display: none !important`（不占位）；两者按属性合并进该元素已有规则，可一键撤销。
+- **桌面端壁纸＝染色只施加一次**：`body` 放原图；`[class*="_frame"]` 放 `linear-gradient(<染色>), url(<壁纸>)`（圆角与画布共用同一层）；`[class*="_centerCol"]` 置 `background-color: transparent` 不再二次染色。若把染色同时留在 frame 与对话列上，强度滑块会几乎无效（0.3.5 的实际故障）。`check:compat` 用 `centerCol`/`_frame` 两个 DOM 契约守住这两个类名。
+- **不要把 `dsh.client.platform` 改成 `"desktop"`**：Host 只服务 `platform === "web"` 的客户端半区；桌面端装进 `$DSH_HOME/profiles/desktop` 即可（默认端口 19387）。
