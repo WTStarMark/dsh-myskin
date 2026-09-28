@@ -12,6 +12,10 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
+// Type-only: pulls the SlotRegistry service merge, which is what makes `ctx.slots`
+// typed. Upstream client plugins carry the same import for the same reason
+// (see @deepseek-ai/dsh-client-locale's client half).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { MySkinSection, type MySkinSectionInjected } from './MySkinSection.tsx'
 import { zh, en, type MySkinKey } from './locales.ts'
@@ -24,8 +28,18 @@ export const SETTINGS_NS = 'settings.dsh-myskin'
 /** Cordis plugin name. */
 export const name = 'dsh-myskin'
 
-/** Required services (cordis fiber inject). */
-export const inject = ['slots', 'locale', 'connection', 'remote', 'configForms', 'theme']
+/**
+ * Required services (cordis fiber inject).
+ *
+ * Only what this half actually touches: `inject` GATES activation (cordis keeps the
+ * fiber pending until every named service exists), so a name kept "just in case"
+ * turns an upstream rename into a silently dead settings page. `connection` and
+ * `remote` were listed here without ever being read and are gone; `ctx.slots` is
+ * typed through the type-only `@deepseek-ai/dsh-client-ui-renderer/client` import
+ * below, and every name is re-verified per DSH generation by
+ * `npm run check:types` (tests/types/inject-services.ts).
+ */
+export const inject = ['slots', 'locale', 'configForms', 'theme']
 
 /**
  * Namespaces this page follows, in priority order: the current entry id first,

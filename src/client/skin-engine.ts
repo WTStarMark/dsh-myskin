@@ -13,6 +13,7 @@
 
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
 import type { CssRule, InjectedLayer, SkinSettings, TextOverride, TokenModes } from '../skin-schema.ts'
+import { readDesktopShell } from './desktop.ts'
 
 export const PLUGIN_ID = 'dsh-myskin'
 const STYLE_ID = 'dsh-myskin-rule'
@@ -63,7 +64,24 @@ function directTextNode(el: Element): Text | undefined {
   return undefined
 }
 
-/** Find the element(s) a text entry targets: by selector, else by exact text. */
+/**
+ * Whether one text node can carry an override.
+ *
+ * The editor stores the text it read from the node (trimmed), while the DOM data
+ * usually carries surrounding whitespace, so an exact compare silently matches
+ * nothing — the single most common "text editing does not work" report. `before: ''`
+ * means "the first editable text in this element", which is what the editor stores
+ * when the user edits text they did not type out first.
+ * @param data - the text node's current data.
+ * @param before - the entry's recorded original.
+ * @returns true when this node is the entry's target.
+ */
+function textMatches(data: string, before: string): boolean {
+  const raw = data.trim()
+  return before === '' ? raw !== '' : raw === before.trim()
+}
+
+/** Find the element(s) a text entry targets: by selector, else by matching text. */
 function findTargets(entry: TextOverride): Element[] {
   if (typeof document === 'undefined') return []
   const seen = new Set<Element>()
@@ -77,7 +95,7 @@ function findTargets(entry: TextOverride): Element[] {
   if (result.length === 0) {
     for (const el of Array.from(document.body?.querySelectorAll('*') ?? [])) {
       const text = directTextNode(el)
-      if (text !== undefined && text.data === entry.before) { add(el); continue }
+      if (text !== undefined && textMatches(text.data, entry.before)) { add(el); continue }
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
         if ((el as HTMLInputElement).placeholder === entry.before) add(el)
       }
@@ -163,6 +181,289 @@ export function withBackgroundOpacity(css: readonly CssRule[], opacity: number):
 }
 
 /**
+ * Selector for the app frame.
+ *
+ * Client plugin bundles carry CSS-module names as `_frame_<hash>` in some builds and
+ * as the plain `frame` in others, so match both: the frame is where the wallpaper and
+ * its single tint live, and a miss would put the black notch back.
+ */
+const FRAME_SELECTOR = '[class*="_frame"], [class~="frame"]'
+/** Selector for the conversation column (same naming caveat as {@link FRAME_SELECTOR}). */
+const CENTER_COLUMN_SELECTOR = '[class*="_centerCol"], [class~="centerCol"]'
+
+/** Declaration the editor writes for "hide this control" (keeps its layout slot). */
+export const HIDE_DECLARATION = 'visibility: hidden !important'
+/** Declaration the editor writes for "remove this control" (reclaims its slot). */
+export const REMOVE_DECLARATION = 'display: none !important'
+
+/**
+ * Split a declaration block into `[property, value]` pairs, preserving order and
+ * keeping `!important` as part of the value. Comments are dropped.
+ * @param rule - a declaration block (no braces).
+ * @returns the pairs, empty for a blank rule.
+ */
+function declarationPairs(rule: string): Array<[string, string]> {
+  const out: Array<[string, string]> = []
+  for (const part of rule.replace(/\/\*[\s\S]*?\*\//g, '').split(';')) {
+    const idx = part.indexOf(':')
+    if (idx < 0) continue
+    const prop = part.slice(0, idx).trim()
+    const value = part.slice(idx + 1).trim()
+    if (prop !== '' && value !== '') out.push([prop, value])
+  }
+  return out
+}
+
+/**
+ * Whether a rule already declares one property.
+ * @param rule - the declaration block, or undefined.
+ * @param property - CSS property name to look for.
+ * @returns true when the property is present.
+ */
+export function hasDeclaration(rule: string | undefined, property: string): boolean {
+  return declarationPairs(rule ?? '').some(([prop]) => prop === property)
+}
+
+/**
+ * Merge an addition into a declaration block, overriding by property name.
+ *
+ * The editor must never REPLACE an element's whole rule to hide it: that silently
+ * dropped every other customization the element already had.
+ * @param rule - the existing declaration block, or undefined.
+ * @param addition - declarations to merge in.
+ * @returns the merged block.
+ */
+export function mergeDeclaration(rule: string | undefined, addition: string): string {
+  const merged = new Map(declarationPairs(rule ?? ''))
+  for (const [prop, value] of declarationPairs(addition)) merged.set(prop, value)
+  return [...merged].map(([prop, value]) => prop + ': ' + value).join('; ')
+}
+
+/**
+ * Drop one property from a declaration block.
+ * @param rule - the existing declaration block, or undefined.
+ * @param property - CSS property name to drop.
+ * @returns the remaining declarations (`''` when nothing is left).
+ */
+export function withoutDeclaration(rule: string | undefined, property: string): string {
+  return declarationPairs(rule ?? '').filter(([prop]) => prop !== property).map(([prop, value]) => prop + ': ' + value).join('; ')
+}
+
+/**
+ * The element that actually owns editable text for one selection.
+ *
+ * Text overrides replace a text node's data, so the entry must point at the element
+ * that directly holds the node — selecting a button whose label lives in a child
+ * span (or an icon button with no text at all) is why "edit text" appeared to do
+ * nothing. Fields expose their placeholder instead.
+ * @param el - the element the user selected.
+ * @returns the element to target, or undefined when nothing editable is inside.
+ */
+export function textHostOf(el: Element): Element | undefined {
+  const direct = (node: Element): Text | undefined => {
+    for (const child of Array.from(node.childNodes)) {
+      if (child.nodeType === Node.TEXT_NODE && (child as Text).data.trim() !== '') return child as Text
+    }
+    return undefined
+  }
+  if (direct(el) !== undefined) return el
+  if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return el
+  for (const child of Array.from(el.querySelectorAll('*'))) {
+    if (direct(child) !== undefined) return child
+  }
+  return undefined
+}
+
+/**
+ * Attributes that survive portal remounting, in preference order, with the
+ * attribute to echo back when the anchor is generic.
+ */
+const STABLE_ANCHORS: ReadonlyArray<readonly [string, string | undefined]> = [
+  ['[data-shortcut-modal]', 'data-shortcut-modal'],
+  ['[role="dialog"]', undefined],
+  ['[role="menu"]', undefined],
+  ['[role="listbox"]', undefined],
+]
+
+/**
+ * Escape one id for a `#id` selector.
+ *
+ * The platform's `CSS.escape` when the document's window exposes it (browsers and
+ * jsdom's window both do), else a conservative fallback — reaching for the *global*
+ * `CSS` is what broke this outside a browser.
+ * @param id - the raw element id.
+ * @param view - the element's window, when it has one.
+ * @returns the escaped id.
+ */
+function escapeId(id: string, view: Window | null): string {
+  // `lib.dom` declares CSS as a global, not as a Window member, and jsdom installs it
+  // on its window only — check both, then fall back to a conservative escape.
+  const carrier = globalThis as { CSS?: { escape?: (value: string) => string } }
+  const fromWindow = view as unknown as { CSS?: { escape?: (value: string) => string } } | null
+  const css = carrier.CSS ?? (fromWindow === null ? undefined : fromWindow.CSS)
+  if (css !== undefined && typeof css.escape === 'function') return css.escape(id)
+  return id.replace(/[^A-Za-z0-9_-]/g, (char) => '\\' + char)
+}
+
+/**
+ * The `:nth-of-type` chain from `ancestor`'s child down to `el`.
+ * @param ancestor - exclusive upper bound.
+ * @param el - the target (a descendant of ancestor).
+ * @returns the relative selector ('' when el is the ancestor).
+ */
+function pathWithin(ancestor: Element, el: Element): string {
+  const parts: string[] = []
+  let node: Element | null = el
+  while (node !== null && node !== ancestor) {
+    const current: Element = node
+    const parent = current.parentElement
+    if (parent === null) break
+    const sameTag = Array.from(parent.children).filter((child) => child.tagName === current.tagName)
+    const index = sameTag.indexOf(current) + 1
+    const name = current.tagName.toLowerCase()
+    parts.unshift(index > 1 ? name + ':nth-of-type(' + index + ')' : name)
+    node = parent
+  }
+  return parts.join(' > ')
+}
+
+/**
+ * Build a structural selector for a real DSH node.
+ *
+ * The settings surface, menus and modals are portalled **beside `#root`** (upstream
+ * mounts them as `document.body` children so the shell's drag/overlay rules apply),
+ * so anchoring everything at `#root` produced `#root > … > body > …` for exactly the
+ * elements users pick inside Settings — a selector that matches nothing. Hide,
+ * remove and text editing therefore did nothing at all inside any dialog.
+ *
+ * Strategy: `#root` for the app surface, a stable portal attribute when one is
+ * present, and the body-anchored path as the last resort.
+ * @param el - the element the user selected.
+ * @returns a selector that matches `el` again.
+ */
+export function selectorOf(el: Element): string {
+  if (el.id !== '') return '#' + escapeId(el.id, el.ownerDocument.defaultView)
+  const root = el.ownerDocument.getElementById('root')
+  if (root !== null && root !== el && root.contains(el)) return '#root > ' + pathWithin(root, el)
+  for (const [anchor, attribute] of STABLE_ANCHORS) {
+    const holder = el.closest(anchor)
+    if (holder === null) continue
+    const base = attribute === undefined ? anchor : '[' + attribute + '="' + (holder.getAttribute(attribute) ?? '') + '"]'
+    const rest = holder === el ? '' : pathWithin(holder, el)
+    return rest === '' ? base : base + ' > ' + rest
+  }
+  return 'body > ' + pathWithin(el.ownerDocument.body, el)
+}
+
+/** One resolved shell-surface tint: colour plus the canvas/panel alphas. */
+export interface SurfaceTint {
+  /** `r, g, b` of the shell surface. */
+  readonly rgb: string
+  /** Alpha the canvas surface uses (0..1). */
+  readonly base: number
+  /** Alpha the panel surface uses (0..1). */
+  readonly panel: number
+  /** Where the tint belongs: the token's consumers, or the frame itself. */
+  readonly target: 'token' | 'frame'
+}
+
+/**
+ * Resolve the shell surface the wallpaper must be seen through.
+ * @param doc - the live page.
+ * @param opacity - requested strength, 0..1 (>=0.999 means "leave it opaque").
+ * @param frameTint - resolved `--dsw-alias-bg-base` for a shell that paints no
+ *   opaque surface of its own (see {@link desktopFrameTint}).
+ * @returns the tint, or undefined when nothing should change.
+ */
+export function surfaceTint(doc: Document, opacity: number = DEFAULT_BACKGROUND_OPACITY, frameTint?: string): SurfaceTint | undefined {
+  if (!(opacity < 0.999)) return undefined
+  const base = Math.min(0.98, Math.max(0.35, opacity))
+  const surface = shellSurfaceColor(doc)
+  const tint = surface === undefined && frameTint !== undefined ? parseCssColor(frameTint) : undefined
+  const rgb = surface ?? (tint === undefined ? undefined : tint.r + ', ' + tint.g + ', ' + tint.b)
+  if (rgb === undefined) return undefined
+  return { rgb, base, panel: Math.min(1, base + 0.15), target: surface === undefined ? 'frame' : 'token' }
+}
+
+/**
+ * Rules for one wallpaper: the page background, plus the desktop frame.
+ *
+ * The desktop frame owns the window's rounded corner (Windows rounds the
+ * conversation column's top-left with `--dsh-windows-content-radius`). Leaving the
+ * frame transparent so the page image could show through therefore exposed the
+ * native window colour (Electron's opaque chrome fallback, `#1b1b1c` in dark mode)
+ * as a black notch in that corner. Painting the same image on the frame fills the
+ * corner with the wallpaper and still lets the tinted canvas show through.
+ * @param doc - the document being styled.
+ * @param url - the wallpaper data URL.
+ * @returns the CSS rules to write.
+ */
+export function wallpaperRules(doc: Document, url: string, tint?: SurfaceTint): string[] {
+  const geometry = 'background-size: cover !important; background-position: center !important; background-attachment: fixed !important;'
+  const body = 'background-image: url("' + url + '") !important; ' + geometry
+  const rules = ['body { ' + body + ' }']
+  if (!readDesktopShell(doc).desktop) return rules
+  // One tint, applied ONCE, on the frame: the frame owns the window's rounded corner
+  // (Windows rounds the conversation column's top-left), so it has to carry the image
+  // itself — a transparent frame exposed the native window colour as a black notch.
+  // The tint rides on the frame as a gradient layer ABOVE the image and the
+  // conversation column stops painting its own copy: applying it on both would
+  // double the dimming and the strength slider would barely move anything.
+  const fmt = (value: number): string => String(Math.round(value * 100) / 100)
+  const layers = tint === undefined
+    ? 'url("' + url + '")'
+    : 'linear-gradient(rgba(' + tint.rgb + ', ' + fmt(tint.base) + '), rgba(' + tint.rgb + ', ' + fmt(tint.base) + ')), url("' + url + '")'
+  rules.push(FRAME_SELECTOR + ' { background-image: ' + layers + ' !important; ' + geometry + ' }')
+  if (tint !== undefined) rules.push(CENTER_COLUMN_SELECTOR + ' { background-color: transparent !important; }')
+  return rules
+}
+
+/**
+ * Colour of the surface the shell paints its own canvas with, as `r, g, b`.
+ * @param doc - document to measure (the live page).
+ * @returns the first opaque shell surface colour, or undefined when every
+ *   candidate is missing or fully transparent.
+ */
+function shellSurfaceColor(doc: Document): string | undefined {
+  const frame = doc.querySelector(FRAME_SELECTOR) as HTMLElement | null
+  for (const el of [frame, doc.body]) {
+    if (el === null || el === undefined) continue
+    const parsed = parseCssColor(getComputedStyle(el).backgroundColor)
+    // A fully transparent surface would tint the whole app black: try the next one.
+    if (parsed === undefined || parsed.a === 0) continue
+    return parsed.r + ', ' + parsed.g + ', ' + parsed.b
+  }
+  return undefined
+}
+
+/**
+ * Colour to tint when the desktop shell paints no opaque surface of its own.
+ *
+ * The macOS desktop window is transparent so the native sidebar vibrancy shows
+ * through (`html[data-platform='darwin'], body { background: transparent }` in the
+ * shipped Web bundle), which leaves `--dsw-alias-bg-base` painted by no element:
+ * a wallpaper on `body` would show at full strength and the strength slider
+ * would do nothing. Resolving the token gives the engine a colour to lay over
+ * the wallpaper on the frame itself. Plain browsers and the Windows shell paint
+ * the token, so they never reach this fallback.
+ * @param doc - document to inspect (the live page).
+ * @returns a CSS colour, or undefined on the Web / when the token is absent.
+ */
+export function desktopFrameTint(doc: Document): string | undefined {
+  if (!readDesktopShell(doc).desktop) return undefined
+  const view = doc.defaultView
+  if (view === null) return undefined
+  // Body first: the token layer binds the skin's overrides there, and a custom
+  // bg-base should tint the frame with the colour the user actually picked.
+  for (const el of [doc.body, doc.documentElement]) {
+    if (el === null || el === undefined) continue
+    const value = view.getComputedStyle(el).getPropertyValue('--dsw-alias-bg-base').trim()
+    if (value !== '' && parseCssColor(value) !== undefined) return value
+  }
+  return undefined
+}
+
+/**
  * Rules that let a body background image show through the shell surface WITHOUT
  * washing the UI out.
  *
@@ -175,28 +476,24 @@ export function withBackgroundOpacity(css: readonly CssRule[], opacity: number):
  *
  * @param doc - document to measure (the live page).
  * @param opacity - shell surface opacity, 0..1.
+ * @param frameTint - resolved `--dsw-alias-bg-base` for a shell that paints no
+ *   opaque surface (see {@link desktopFrameTint}); undefined on the Web.
  * @returns CSS rules, or an empty array when nothing should be overridden.
  */
-export function backgroundSurfaceRules(doc: Document, opacity: number = DEFAULT_BACKGROUND_OPACITY): string[] {
-  if (!(opacity < 0.999)) return []
-  const base = Math.min(0.98, Math.max(0.35, opacity))
-  const frame = doc.querySelector('[class*="_frame"]') as HTMLElement | null
-  for (const el of [frame, doc.body]) {
-    if (el === null || el === undefined) continue
-    const parsed = parseCssColor(getComputedStyle(el).backgroundColor)
-    // A fully transparent surface would tint the whole app black: try the next one.
-    if (parsed === undefined || parsed.a === 0) continue
-    const rgb = parsed.r + ', ' + parsed.g + ', ' + parsed.b
-    // Round to two decimals so 0.8 + 0.15 does not leak float noise into the CSS.
-    const fmt = (value: number): string => String(Math.round(value * 100) / 100)
-    const rules = ['body { --dsw-alias-bg-base: rgba(' + rgb + ', ' + fmt(base) + ') !important; }']
-    // Panels keep more body than the canvas: text on cards stays crisp while the
-    // wallpaper still reads as texture. Dialogs/menus (layer-2/overlay) never move.
-    const panel = Math.min(1, base + 0.15)
-    if (panel < 0.999) rules.push('body { --dsw-alias-bg-layer-1: rgba(' + rgb + ', ' + fmt(panel) + ') !important; }')
-    return rules
-  }
-  return []
+export function backgroundSurfaceRules(doc: Document, opacity: number = DEFAULT_BACKGROUND_OPACITY, frameTint?: string): string[] {
+  const tint = surfaceTint(doc, opacity, frameTint)
+  if (tint === undefined) return []
+  // Round to two decimals so 0.8 + 0.15 does not leak float noise into the CSS.
+  const fmt = (value: number): string => String(Math.round(value * 100) / 100)
+  // A transparent desktop shell paints the token nowhere, so the tint goes on the
+  // frame itself: above the wallpaper, below every panel.
+  const rules: string[] = [tint.target === 'token'
+    ? 'body { --dsw-alias-bg-base: rgba(' + tint.rgb + ', ' + fmt(tint.base) + ') !important; }'
+    : FRAME_SELECTOR + ' { background-color: rgba(' + tint.rgb + ', ' + fmt(tint.base) + ') !important; }']
+  // Panels keep more body than the canvas: text on cards stays crisp while the
+  // wallpaper still reads as texture. Dialogs/menus (layer-2/overlay) never move.
+  if (tint.panel < 0.999) rules.push('body { --dsw-alias-bg-layer-1: rgba(' + tint.rgb + ', ' + fmt(tint.panel) + ') !important; }')
+  return rules
 }
 
 /**
@@ -297,12 +594,14 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
     cleanups.push(() => { mo.disconnect() })
   }
 
-  if (skin.canvas.background !== undefined && skin.canvas.background !== '') {
-    rules.push(`body { background-image: url("${skin.canvas.background}") !important; background-size: cover !important; background-position: center !important; background-attachment: fixed !important; }`)
-    // DSH paints opaque surfaces over <body>, so also make the base surfaces
-    // semi-transparent (kept INSIDE the skin-owned <style>, removed on dispose, so
-    // <body>'s inline style is never touched and the skin stays byte-reversible).
-    if (typeof document !== 'undefined') rules.push(...backgroundSurfaceRules(document, readBackgroundOpacity(skin)))
+  // DSH paints opaque surfaces over <body>, so the wallpaper goes on <body> AND (on a
+  // desktop shell) on the frame; the base surfaces then become semi-transparent.
+  // Everything stays INSIDE the skin-owned <style>, removed on dispose, so <body>'s
+  // inline style is never touched and the skin stays byte-reversible.
+  if (skin.canvas.background !== undefined && skin.canvas.background !== '' && typeof document !== 'undefined') {
+    const opacity = readBackgroundOpacity(skin)
+    rules.push(...wallpaperRules(document, skin.canvas.background, surfaceTint(document, opacity, desktopFrameTint(document))))
+    rules.push(...backgroundSurfaceRules(document, opacity, desktopFrameTint(document)))
   }
   for (const { selector, rule } of skin.css) {
     if (selector !== '' && rule !== '') rules.push(`${selector} { ${rule} }`)
@@ -435,7 +734,7 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
   // re-apply per microtask batch (so busy React re-renders don't re-scan the
   // whole DOM per mutation), with a deduped restore on dispose.
   const textEntries = skin.text.filter((e) => e.after !== '' && e.before !== e.after)
-  const patches: TextPatch[] = []
+  const patches = new Map<Text, TextPatch>()
   interface PlaceholderPatch { el: Element; original: string; applied: string }
   const placeholderPatches: PlaceholderPatch[] = []
   if (textEntries.length > 0 && typeof document !== 'undefined' && typeof MutationObserver !== 'undefined') {
@@ -446,9 +745,10 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
       for (const entry of textEntries) {
         for (const el of findTargets(entry)) {
           const node = directTextNode(el)
-          if (node !== undefined && node.data === entry.before) {
+          if (node !== undefined && textMatches(node.data, entry.before)) {
+            // Keep the RAW original: the DOM's whitespace must come back byte-exact.
+            if (!patches.has(node)) patches.set(node, { node, original: node.data, applied: entry.after })
             node.data = entry.after
-            patches.push({ node, original: entry.before, applied: entry.after })
           } else if (node === undefined && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
             if ((el as HTMLInputElement).placeholder === entry.before) {
               (el as HTMLInputElement).placeholder = entry.after
@@ -470,13 +770,10 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
     }
   })
   cleanups.push(() => {
-    const seen = new Set<Text>()
-    for (const patch of patches) {
-      if (!seen.has(patch.node) && patch.node.data === patch.applied) {
-        patch.node.data = patch.original
-        seen.add(patch.node)
-      }
+    for (const patch of patches.values()) {
+      if (patch.node.data === patch.applied) patch.node.data = patch.original
     }
+    patches.clear()
   })
 
   // Restore <body>'s inline style byte-exactly, AFTER every other cleanup ran.

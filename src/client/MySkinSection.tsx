@@ -11,14 +11,18 @@
 
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import type { ChangeEvent, CSSProperties, MouseEvent, PointerEvent, ReactNode } from 'react'
+import type { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { Button, Pill, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { IconClose, IconPersonalization, IconPlus, IconTrash } from './icons.ts'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { parseSkin, EMPTY_SKIN, type BlendMode, type CssRule, type EmbeddedImage, type NamedSkin, type SkinCanvas, type SkinSettings, type TokenOverrides } from '../skin-schema.ts'
-import { backgroundSurfaceRules, currentSettingsPageKey, readBackgroundOpacity, withBackgroundOpacity } from './skin-engine.ts'
+import {
+  HIDE_DECLARATION, REMOVE_DECLARATION, backgroundSurfaceRules, currentSettingsPageKey, desktopFrameTint,
+  mergeDeclaration, readBackgroundOpacity, selectorOf, surfaceTint, textHostOf, wallpaperRules, withBackgroundOpacity, withoutDeclaration,
+} from './skin-engine.ts'
+import { editorFrameRules, pulseWindowDragRecall, readDesktopShell } from './desktop.ts'
 import type { MySkinKey } from './locales.ts'
 import { PRESETS } from './presets.ts'
 import { TOKEN_CATALOG, TOKEN_GROUP_KEYS, type TokenGroup } from './token-catalog.ts'
@@ -58,7 +62,7 @@ function clampNum(v: number, min: number, max: number): number {
 }
 
 /** Run a drag/resize gesture with pointer capture, ending cleanly on release. */
-function beginPointerDrag(e: PointerEvent, onMove: (ev: PointerEvent) => void): void {
+function beginPointerDrag(e: ReactPointerEvent, onMove: (ev: PointerEvent) => void): void {
   const el = e.currentTarget as HTMLElement
   const move = (ev: PointerEvent): void => onMove(ev)
   const finish = (): void => {
@@ -90,6 +94,21 @@ function parseStateRule(rule: string): Record<string, string> {
   return out
 }
 
+/**
+ * Split one constant declaration into `[property, value]` for the merge helpers.
+ * @param declaration - e.g. `visibility: hidden !important`.
+ * @returns the property and its value.
+ */
+function declarationPair(declaration: string): [string, string] {
+  const index = declaration.indexOf(':')
+  return [declaration.slice(0, index).trim(), declaration.slice(index + 1).trim()]
+}
+
+/** "Hide this control" as a property/value pair. */
+const HIDE_PAIR = declarationPair(HIDE_DECLARATION)
+/** "Remove this control" as a property/value pair. */
+const REMOVE_PAIR = declarationPair(REMOVE_DECLARATION)
+
 /** Try to normalize a CSS color string to a #rrggbb hex (for <input type=color>). */
 function toHex(v: string): string | undefined {
   if (v === 'transparent') return undefined
@@ -114,18 +133,50 @@ export interface MySkinSectionInjected {
 /** Props delivered by the slot outlet: inject face + the section-owner close. */
 export type MySkinSectionProps = Partial<InjectFace<MySkinSectionInjected>> & { close?: () => void }
 
-/** Persist the whole skin document to the durable settings namespace. */
-function persist(scope: ConfigForm<SkinSettings>, skin: SkinSettings): Promise<boolean[]> {
-  return Promise.all([
-    scope.set('enabled', skin.enabled),
-    scope.set('tokens', skin.tokens),
-    scope.set('css', skin.css),
-    scope.set('text', skin.text),
-    scope.set('canvas', skin.canvas),
-    scope.set('layers', skin.layers),
-    scope.set('content', skin.content ?? {}),
-    scope.set('library', skin.library),
-  ])
+/** One durable write's outcome: which fields the Host refused, if any. */
+export interface PersistReport {
+  ok: boolean
+  /** Field names the Host did not accept ('*' means the write itself failed). */
+  failed: string[]
+}
+
+/**
+ * Persist the whole skin document to the durable settings namespace.
+ *
+ * `ConfigForm.set` resolves false when the Host refuses a path (not `volatile`, a
+ * schema mismatch, a rejected value) and throws when the connection drops; the
+ * editor used to collapse both into one flat boolean, which is why "saving does
+ * nothing" was unactionable. Naming the refused fields is what makes it fixable.
+ * @param scope - the namespace form.
+ * @param skin - the document to store.
+ * @returns which fields were written and which the Host refused.
+ */
+function persist(scope: ConfigForm<SkinSettings>, skin: SkinSettings): Promise<PersistReport> {
+  const writes: Array<[string, Promise<boolean>]> = [
+    ['enabled', scope.set('enabled', skin.enabled)],
+    ['tokens', scope.set('tokens', skin.tokens)],
+    ['css', scope.set('css', skin.css)],
+    ['text', scope.set('text', skin.text)],
+    ['canvas', scope.set('canvas', skin.canvas)],
+    ['layers', scope.set('layers', skin.layers)],
+    ['content', scope.set('content', skin.content ?? {})],
+    ['library', scope.set('library', skin.library)],
+  ]
+  return Promise.all(writes.map(([, write]) => write)).then((accepted) => {
+    const failed = writes.filter((_, index) => accepted[index] !== true).map(([field]) => field)
+    return { ok: failed.length === 0, failed }
+  })
+}
+
+/**
+ * Localized one-line description of a failed write.
+ * @param report - the failed write.
+ * @param t - the page's dictionary lookup.
+ * @returns the message to show in the editor.
+ */
+function saveFailureText(report: PersistReport, t: (key: MySkinKey) => string): string {
+  if (report.failed.includes('*')) return t('applyFailed')
+  return t('saveFailed') + report.failed.join(', ')
 }
 
 /** Which built-in preset the current token overrides match (if any). */
@@ -149,13 +200,13 @@ function closeSkinEditor(): void {
   editorHost.container.remove()
   editorHost = undefined
 }
-function openSkinEditor(initial: SkinSettings, t: (k: MySkinKey) => string, onCommit: (next: SkinSettings) => Promise<boolean>, onClose: () => void, onPersistStrength: (canvas: SkinCanvas, css: CssRule[]) => Promise<boolean>): void {
+function openSkinEditor(initial: SkinSettings, t: (k: MySkinKey) => string, onCommit: (next: SkinSettings) => Promise<PersistReport>, onClose: () => void, onPersistStrength: (canvas: SkinCanvas, css: CssRule[]) => Promise<PersistReport>): void {
   closeSkinEditor()
   const container = document.createElement('div')
   document.body.appendChild(container)
   editorHost = { root: createRoot(container), container }
   editorHost.root.render(
-    <SkinCanvas initial={initial} t={t} onPersistStrength={onPersistStrength} onCommit={async (next) => { const ok = await onCommit(next); if (ok) closeSkinEditor(); return ok }} onClose={() => { onClose(); closeSkinEditor() }} />,
+    <SkinCanvas initial={initial} t={t} onPersistStrength={onPersistStrength} onCommit={async (next) => { const report = await onCommit(next); if (report.ok) closeSkinEditor(); return report }} onClose={() => { onClose(); closeSkinEditor() }} />,
   )
 }
 
@@ -203,12 +254,11 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
    * @param next - the skin document to store.
    * @returns true when all fields were accepted.
    */
-  const persistNow = async (next: SkinSettings): Promise<boolean> => {
+  const persistNow = async (next: SkinSettings): Promise<PersistReport> => {
     setSkin(parseSkin(next))
     try {
-      const accepted = await persist(scope, next)
-      return accepted.every((ok) => ok)
-    } catch { return false }
+      return await persist(scope, next)
+    } catch { return { ok: false, failed: ['*'] } }
   }
 
   /**
@@ -218,15 +268,16 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
    * @param css - the rule list carrying the strength marker.
    * @returns true when both fields were accepted.
    */
-  const persistStrength = async (canvas: SkinCanvas, css: CssRule[]): Promise<boolean> => {
+  const persistStrength = async (canvas: SkinCanvas, css: CssRule[]): Promise<PersistReport> => {
     try {
       const accepted = await Promise.all([scope.set('canvas', canvas), scope.set('css', css)])
-      return accepted.every((ok) => ok)
-    } catch { return false }
+      const failed = ['canvas', 'css'].filter((_, index) => accepted[index] !== true)
+      return { ok: failed.length === 0, failed }
+    } catch { return { ok: false, failed: ['*'] } }
   }
 
   const update = (next: SkinSettings): void => {
-    void persistNow(next).then((ok) => { if (!ok) setNotice('save failed') })
+    void persistNow(next).then((report) => { if (!report.ok) setNotice(saveFailureText(report, t)) })
   }
 
   const applyNow = (): void => {
@@ -289,6 +340,9 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
       const entry: NamedSkin = {
         id: 'skin-' + Date.now(), name,
         tokens: skin.tokens, css: skin.css, text: skin.text, canvas: skin.canvas,
+        // Required by NamedSkin: saving without it silently dropped every injected
+        // layer from the library (and from any export of it).
+        layers: skin.layers,
       }
       update({ ...skin, library: [...skin.library, entry] })
     } else if (nameDialog.mode === 'rename' && nameDialog.id !== undefined) {
@@ -399,8 +453,8 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
           <Button style={btnBase} onClick={confirmSkinName}>{t('confirm')}</Button>
         </>)}
       >
-        <Input value={skinName} autoFocus onChange={(e) => { setSkinName(e.target.value) }}
-          onKeyDown={(e) => { if (e.key === 'Enter') confirmSkinName() }} />
+        <Input value={skinName} autoFocus onChange={(e: ChangeEvent<HTMLInputElement>) => { setSkinName(e.target.value) }}
+          onKeyDown={(e: ReactKeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') confirmSkinName() }} />
       </Modal>
     </div>
   )
@@ -420,15 +474,41 @@ function SkinToggle({ checked, onChange, status }: { checked: boolean; onChange:
 
 /** Longest edge a stored skin image is downscaled to (keeps the settings document small). */
 const MAX_IMAGE_EDGE = 2048
+/** Longest edge for the page wallpaper: it covers the viewport, so 2048 is waste. */
+const MAX_WALLPAPER_EDGE = 1600
+/** Encoded data URL budget: an oversized field is what makes a settings write fail. */
+const MAX_DATA_URL_LENGTH = 1_500_000
 
 /**
- * Read an image file as a data URL, downscaling anything larger than
- * {@link MAX_IMAGE_EDGE}. The document is written to the profile patch and
- * re-sent on every edit, so an untouched 8 MB photo would make every save slow.
+ * Encode one wallpaper so the document stays writable.
+ *
+ * The durable document is re-sent on every edit, so a multi-megabyte data URL is
+ * what turns "apply" into a silent failure on a slow link or a size-limited host.
+ * Each step is a real re-encode; when even the smallest still overflows, the
+ * caller refuses the image instead of storing something that cannot be saved.
+ * @param file - the picked image.
+ * @returns the data URL (empty when it cannot be made to fit) and whether it needed shrinking.
+ */
+async function readBoundedImage(file: File): Promise<{ url: string; compressed: boolean }> {
+  const first = await readImageFile(file, MAX_WALLPAPER_EDGE, 0.85)
+  if (first === '') return { url: '', compressed: false }
+  if (first.length <= MAX_DATA_URL_LENGTH) return { url: first, compressed: false }
+  const steps: ReadonlyArray<readonly [number, number]> = [[1280, 0.8], [960, 0.72]]
+  for (const [edge, quality] of steps) {
+    const next = await readImageFile(file, edge, quality)
+    if (next !== '' && next.length <= MAX_DATA_URL_LENGTH) return { url: next, compressed: true }
+  }
+  return { url: '', compressed: true }
+}
+
+/**
+ * Read an image file as a data URL.
  * @param file - the picked image file.
+ * @param maxEdge - longest edge after downscaling.
+ * @param quality - WebP quality used when downscaling.
  * @returns the data URL to store ('' when the file could not be read).
  */
-function readImageFile(file: File): Promise<string> {
+function readImageFile(file: File, maxEdge = MAX_IMAGE_EDGE, quality = 0.9): Promise<string> {
   return new Promise((resolve) => {
     const reader = new FileReader()
     reader.onerror = () => resolve('')
@@ -439,15 +519,15 @@ function readImageFile(file: File): Promise<string> {
       image.onerror = () => resolve(url)
       image.onload = () => {
         const edge = Math.max(image.naturalWidth, image.naturalHeight)
-        if (edge <= MAX_IMAGE_EDGE || typeof document === 'undefined') { resolve(url); return }
-        const scale = MAX_IMAGE_EDGE / edge
+        if (edge <= maxEdge || typeof document === 'undefined') { resolve(url); return }
+        const scale = maxEdge / edge
         const target = document.createElement('canvas')
         target.width = Math.max(1, Math.round(image.naturalWidth * scale))
         target.height = Math.max(1, Math.round(image.naturalHeight * scale))
         const context = target.getContext('2d')
         if (context === null) { resolve(url); return }
         context.drawImage(image, 0, 0, target.width, target.height)
-        try { resolve(target.toDataURL('image/webp', 0.9)) } catch { resolve(url) }
+        try { resolve(target.toDataURL('image/webp', quality)) } catch { resolve(url) }
       }
       image.src = url
     }
@@ -458,9 +538,9 @@ function readImageFile(file: File): Promise<string> {
 interface CanvasProps {
   initial: SkinSettings
   onClose: () => void
-  onCommit: (next: SkinSettings) => Promise<boolean>
+  onCommit: (next: SkinSettings) => Promise<PersistReport>
   /** Persist just the canvas + css fields (the strength slider auto-saves). */
-  onPersistStrength: (canvas: SkinCanvas, css: CssRule[]) => Promise<boolean>
+  onPersistStrength: (canvas: SkinCanvas, css: CssRule[]) => Promise<PersistReport>
   t: (key: MySkinKey) => string
 }
 
@@ -482,10 +562,13 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
   useEffect(() => { draftRef.current = draft }, [draft])
   const pastRef = useRef<SkinSettings[]>([])
   const futureRef = useRef<SkinSettings[]>([])
+  /** Durable-write status shown in the toolbar (edits are drafts until applied). */
+  const [save, setSave] = useState<{ state: 'saved' | 'dirty' | 'saving' | 'failed'; detail?: string }>({ state: 'saved' })
   const snapshot = (): void => {
     pastRef.current = [...pastRef.current, JSON.parse(JSON.stringify(draftRef.current))]
     futureRef.current = []
     bumpHistory((n) => n + 1)
+    setSave((prev) => prev.state === 'dirty' ? prev : { state: 'dirty' })
   }
   const undo = (): void => {
     const prev = pastRef.current[pastRef.current.length - 1]
@@ -551,17 +634,15 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
   useEffect(() => {
     const root = document.documentElement
     const priorStyle = root.getAttribute('style')
+    const shell = readDesktopShell(document)
     const tag = document.createElement('style')
     tag.id = 'dsh-myskin-frame'
-    tag.textContent = [
-      'body {',
-      '  margin-top: var(--dsh-myskin-inset-top, 48px) !important;',
-      '  margin-right: var(--dsh-myskin-inset-right, 340px) !important;',
-      '  height: calc(100vh - var(--dsh-myskin-inset-top, 48px)) !important;',
-      '}',
-      '#root { height: 100% !important; }',
-    ].join(String.fromCharCode(10))
+    tag.textContent = editorFrameRules(shell).join(String.fromCharCode(10))
     document.head.appendChild(tag)
+    // Electron recollects the window's drag rects only when a computed app-region
+    // value changes, and the shell's watcher sees neither a <head> write nor an
+    // <html> variable write: pulse once per layout move (no-op off macOS).
+    pulseWindowDragRecall(document)
     const measure = (): void => {
       const bar = barRef.current
       const panel = panelRef.current
@@ -579,6 +660,7 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
       tag.remove()
       if (priorStyle === null) root.removeAttribute('style')
       else root.setAttribute('style', priorStyle)
+      pulseWindowDragRecall(document)
     }
   }, [])
 
@@ -586,8 +668,9 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
   useEffect(() => {
     const rules: string[] = []
     if (draft.canvas.background !== undefined && draft.canvas.background !== '') {
-      rules.push('body { background-image: url("' + draft.canvas.background + '") !important; background-size: cover !important; background-position: center !important; }')
-      rules.push(...backgroundSurfaceRules(document, readBackgroundOpacity(draft)))
+      const opacity = readBackgroundOpacity(draft)
+      rules.push(...wallpaperRules(document, draft.canvas.background, surfaceTint(document, opacity, desktopFrameTint(document))))
+      rules.push(...backgroundSurfaceRules(document, opacity, desktopFrameTint(document)))
     }
     for (const { selector, rule } of draft.css) {
       if (selector !== '' && rule !== '') rules.push(selector + ' { ' + rule + ' }')
@@ -615,8 +698,12 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
     }
   }, [draft.css, draft.canvas.background, draft.canvas.backgroundOpacity, draft.canvas.images])
 
-  // Remove the live style tag on unmount.
-  useEffect(() => () => { if (liveStyleRef.current !== null) { liveStyleRef.current.remove(); liveStyleRef.current = null } }, [])
+  // Remove the live style tag and every live text patch on unmount.
+  useEffect(() => () => {
+    if (liveStyleRef.current !== null) { liveStyleRef.current.remove(); liveStyleRef.current = null }
+    restoreLiveText()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const hitTest = (clientX: number, clientY: number): Element | undefined => {
     const d = document
@@ -646,15 +733,86 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
     const rules = draft.css.filter((r) => r.selector !== selector)
     setDraft({ ...draft, css: [...rules, { selector, rule: declaration }] })
   }
-  const hideElement = (selector: string): void => {
+  /**
+   * Set or drop ONE declaration on an element's rule.
+   *
+   * Hiding used to REPLACE the element's whole rule, silently throwing away every
+   * other customization it had; merging by property keeps them.
+   * @param selector - the element's selector.
+   * @param property - CSS property to write.
+   * @param value - value to write, or undefined to drop the property.
+   */
+  const setElementProperty = (selector: string, property: string, value: string | undefined): void => {
     snapshot()
-    const rules = draft.css.filter((r) => r.selector !== selector)
-    setDraft({ ...draft, css: [...rules, { selector, rule: 'display: none !important' }] })
+    const existing = draft.css.find((r) => r.selector === selector)?.rule
+    const merged = value === undefined
+      ? withoutDeclaration(existing, property)
+      : mergeDeclaration(existing, property + ': ' + value)
+    const rest = draft.css.filter((r) => r.selector !== selector)
+    setDraft({ ...draft, css: merged === '' ? rest : [...rest, { selector, rule: merged }] })
   }
+  /** Hide a control but keep its layout slot (visibility). */
+  const hideElement = (selector: string): void => { setElementProperty(selector, HIDE_PAIR[0], HIDE_PAIR[1]) }
+  /** Undo {@link hideElement}. */
+  const unhideElement = (selector: string): void => { setElementProperty(selector, HIDE_PAIR[0], undefined) }
+  /** Remove a control and reclaim its slot (display: none). */
+  const removeControl = (selector: string): void => { setElementProperty(selector, REMOVE_PAIR[0], REMOVE_PAIR[1]) }
+  /** Undo {@link removeControl}. */
+  const restoreControl = (selector: string): void => { setElementProperty(selector, REMOVE_PAIR[0], undefined) }
+  /**
+   * Text the canvas has already written into the live page (node → original data).
+   * The engine applies text only on commit, so without this "edit text" looked like a
+   * no-op until 应用; every entry is restored on unmount, revert or reset.
+   */
+  const textPatches = useRef(new Map<Text | HTMLInputElement, string>())
+
+  /**
+   * Write one text override into the live page immediately.
+   * @param selector - the target element's selector.
+   * @param after - the new text.
+   */
+  const patchLiveText = (selector: string, after: string): void => {
+    const host = document.querySelector(selector)
+    if (host === null) return
+    if (host.tagName === 'INPUT' || host.tagName === 'TEXTAREA') {
+      const field = host as HTMLInputElement
+      if (!textPatches.current.has(field)) textPatches.current.set(field, field.placeholder)
+      field.placeholder = after
+      return
+    }
+    const node = Array.from(host.childNodes).find((n) => n.nodeType === Node.TEXT_NODE) as Text | undefined
+    if (node === undefined) return
+    if (!textPatches.current.has(node)) textPatches.current.set(node, node.data)
+    node.data = after
+  }
+
+  /**
+   * Put live text patches back.
+   * @param host - only restore patches inside this element; omit to restore all.
+   */
+  const restoreLiveText = (host?: Element): void => {
+    for (const [target, original] of [...textPatches.current]) {
+      if (host !== undefined) {
+        const owns = target instanceof Text ? host.contains(target) : target === host
+        if (!owns) continue
+      }
+      if (target instanceof Text) { if (target.isConnected) target.data = original }
+      else if (target.isConnected) target.placeholder = original
+      textPatches.current.delete(target)
+    }
+  }
+
   const addText = (selector: string, before: string, after: string): void => {
     snapshot()
     const rest = draft.text.filter((o) => o.selector !== selector || o.before !== before)
     setDraft({ ...draft, text: [...rest, { selector, before, after }] })
+    patchLiveText(selector, after)
+  }
+  /** Drop every text override for one selector (reverts the copy in place). */
+  const removeText = (selector: string): void => {
+    snapshot()
+    setDraft({ ...draft, text: draft.text.filter((o) => o.selector !== selector) })
+    restoreLiveText(document.querySelector(selector) ?? undefined)
   }
   const removeSelector = (selector: string): void => {
     snapshot()
@@ -687,10 +845,11 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
     const file = e.target.files?.[0]
     e.target.value = ''
     if (file === undefined) return
-    void readImageFile(file).then((url) => {
-      if (url === '') { setHint(t('applyFailed')); return }
+    void readBoundedImage(file).then(({ url, compressed }) => {
+      if (url === '') { setHint(t('imageTooLarge')); return }
       snapshot()
       setDraft({ ...draft, canvas: { ...draft.canvas, background: url } })
+      setHint(compressed ? t('imageCompressed') : undefined)
     })
   }
   const clearPageBg = (): void => {
@@ -708,13 +867,13 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
     snapshot()
     setDraft({ ...draft, canvas: { ...draft.canvas, images: draft.canvas.images.filter((img) => img.id !== id) } })
   }
-  const onEmbedPointerDown = (e: PointerEvent, img: EmbeddedImage): void => {
+  const onEmbedPointerDown = (e: ReactPointerEvent, img: EmbeddedImage): void => {
     e.preventDefault()
     snapshot()
     const startX = e.clientX, startY = e.clientY, ox = img.x, oy = img.y
     beginPointerDrag(e, (ev) => { setEmbedLive(img.id, { x: ox + (ev.clientX - startX), y: oy + (ev.clientY - startY) }) })
   }
-  const startEmbedResize = (e: PointerEvent, img: EmbeddedImage): void => {
+  const startEmbedResize = (e: ReactPointerEvent, img: EmbeddedImage): void => {
     e.preventDefault()
     snapshot()
     const startW = img.w, startH = img.h, sx = e.clientX, sy = e.clientY
@@ -738,10 +897,33 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
     }
   }
 
-  const resetDraft = (): void => { snapshot(); setDraft(parseSkin(EMPTY_SKIN)); setSelected(undefined) }
+  const resetDraft = (): void => { snapshot(); setDraft(parseSkin(EMPTY_SKIN)); setSelected(undefined); restoreLiveText() }
   const onApply = (): void => {
     setHint(undefined)
-    void onCommit({ ...draft, enabled: true }).then((ok) => { if (!ok) setHint(t('applyFailed')) })
+    setSave({ state: 'saving' })
+    void onCommit({ ...draft, enabled: true }).then((report) => {
+      if (report.ok) { setSave({ state: 'saved' }); return }
+      const detail = saveFailureText(report, t)
+      setSave({ state: 'failed', detail })
+      setHint(detail)
+    })
+  }
+  /**
+   * Close the editor, persisting unsaved edits first.
+   *
+   * Closing used to discard the draft silently, which reads as "saving does not
+   * work": the user edits, closes, and the page is unchanged. A failed write keeps
+   * the editor open with the reason instead of losing the work.
+   */
+  const onCloseOrSave = (): void => {
+    if (save.state !== 'dirty') { onClose(); return }
+    setSave({ state: 'saving' })
+    void onCommit({ ...draft }).then((report) => {
+      if (report.ok) { onClose(); return }
+      const detail = saveFailureText(report, t)
+      setSave({ state: 'failed', detail })
+      setHint(detail)
+    })
   }
   const toggleMode = (): void => { setMode(mode === 'edit' ? 'interact' : 'edit') }
 
@@ -753,7 +935,12 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
     if (strengthTimer.current !== undefined) window.clearTimeout(strengthTimer.current)
     strengthTimer.current = window.setTimeout(() => {
       strengthTimer.current = undefined
-      void onPersistStrength(canvas, css).then((ok) => { if (!ok) setHint(t('applyFailed')) })
+      void onPersistStrength(canvas, css).then((report) => {
+        if (report.ok) { setSave({ state: 'saved' }); return }
+        const detail = saveFailureText(report, t)
+        setSave({ state: 'failed', detail })
+        setHint(detail)
+      })
     }, 400)
   }
 
@@ -761,7 +948,7 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
 
   return (
     <div data-dsh-myskin-ui="1" data-dsh-myskin-canvas="1" style={{ position: 'fixed', inset: 0, zIndex: 9999, pointerEvents: 'none', color: tok.labelPrimary }}>
-      <div ref={barRef} data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', position: 'absolute', top: 0, left: 0, right: 0, minHeight: 48, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 16px', background: tok.bgOverlay, borderBottom: '1px solid var(--dsw-alias-border-l1)', zIndex: 10005, color: tok.labelPrimary }}>
+      <div ref={barRef} data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', position: 'absolute', top: 'var(--dsh-myskin-chrome-top, 0px)', left: 0, right: 0, minHeight: 48, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 16px 6px var(--dsh-myskin-leading, 16px)', background: tok.bgOverlay, borderBottom: '1px solid var(--dsw-alias-border-l1)', zIndex: 10005, color: tok.labelPrimary }}>
         <IconPersonalization size={16} />
         <span style={{ fontSize: 14, lineHeight: '22px', fontWeight: 500 }}>{t('title')} — {t('edit')}</span>
         <span style={{ flex: 1 }} />
@@ -776,11 +963,14 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
         ) : null}
         <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{mode === 'edit' ? t('editHint') : t('interactHint')}</span>
         {hint !== undefined ? <span style={{ fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-primary)' }}>{hint}</span> : null}
+        <span style={{ fontSize: 12, lineHeight: '18px', color: save.state === 'failed' ? 'var(--dsw-alias-state-error-primary)' : save.state === 'dirty' ? 'var(--dsw-alias-state-warn-primary)' : tok.labelTertiary }}>
+          {save.state === 'dirty' ? t('unsaved') : save.state === 'saving' ? t('saving') : save.state === 'failed' ? (save.detail ?? t('saveFailed')) : t('savedOk')}
+        </span>
         <Button style={btnBase} onClick={onApply}>{t('apply')}</Button>
         <Button style={btnBase} variant="ghost" icon={<IconTrash size={16} />} onClick={resetDraft}>{t('reset')}</Button>
-        <Button style={btnBase} variant="ghost" icon={<IconClose size={16} />} onClick={onClose}>{t('close')}</Button>
+        <Button style={btnBase} variant="ghost" icon={<IconClose size={16} />} onClick={onCloseOrSave}>{t('close')}</Button>
       </div>
-      <div ref={panelRef} data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', position: 'absolute', top: 'var(--dsh-myskin-inset-top, 48px)', right: 0, bottom: 0, width: 340, display: 'flex', flexDirection: 'column', gap: 12, overflow: 'auto', padding: 12, background: tok.bgOverlay, borderLeft: '1px solid ' + tok.borderL2, zIndex: 10004 }}>
+      <div ref={panelRef} data-dsh-myskin-ui="1" style={{ pointerEvents: 'auto', position: 'absolute', top: 'calc(var(--dsh-myskin-chrome-top, 0px) + var(--dsh-myskin-inset-top, 48px))', right: 0, bottom: 0, width: 340, display: 'flex', flexDirection: 'column', gap: 12, overflow: 'auto', padding: 12, background: tok.bgOverlay, borderLeft: '1px solid ' + tok.borderL2, zIndex: 10004 }}>
         {draft.canvas.background !== undefined && draft.canvas.background !== '' ? (
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: tok.labelSecondary }}>
             <span>{t('backgroundOpacity')} · {Math.round(readBackgroundOpacity(draft) * 100)}%</span>
@@ -800,7 +990,22 @@ function SkinCanvas({ initial, onClose, onCommit, onPersistStrength, t }: Canvas
         ) : null}
           {mode === 'edit' ? (
             selected !== undefined ? (
-              <Inspector target={selected} draft={draft} onSample={liveApply} onText={addText} onRemove={removeSelector} onEmbedOpacity={(id, v) => updateEmbed(id, { opacity: clampNum(v, 0, 1) })} onEmbedBlend={(id, v) => updateEmbed(id, { blend: v })} onRemoveEmbed={removeEmbed} onHide={hideElement} t={t} />
+              <Inspector
+                target={selected}
+                draft={draft}
+                onSample={liveApply}
+                onText={addText}
+                onRemoveText={removeText}
+                onRemove={removeSelector}
+                onEmbedOpacity={(id, v) => updateEmbed(id, { opacity: clampNum(v, 0, 1) })}
+                onEmbedBlend={(id, v) => updateEmbed(id, { blend: v })}
+                onRemoveEmbed={removeEmbed}
+                onHide={hideElement}
+                onUnhide={unhideElement}
+                onRemoveControl={removeControl}
+                onRestoreControl={restoreControl}
+                t={t}
+              />
             ) : (
               <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{t('noSelection')}</span>
             )
@@ -844,15 +1049,20 @@ interface InspectorProps {
   draft: SkinSettings
   onSample: (selector: string, declaration: string) => void
   onText: (selector: string, before: string, after: string) => void
+  /** Drop the text override that reverts the copy. */
+  onRemoveText: (selector: string) => void
   onRemove: (selector: string) => void
   onEmbedOpacity: (id: string, v: number) => void
   onEmbedBlend: (id: string, v: BlendMode) => void
   onRemoveEmbed: (id: string) => void
   onHide: (selector: string) => void
+  onUnhide: (selector: string) => void
+  onRemoveControl: (selector: string) => void
+  onRestoreControl: (selector: string) => void
   t: (key: MySkinKey) => string
 }
 
-function Inspector({ target, draft, onSample, onText, onRemove, onEmbedOpacity, onEmbedBlend, onRemoveEmbed, onHide, t }: InspectorProps): ReactNode {
+function Inspector({ target, draft, onSample, onText, onRemoveText, onRemove, onEmbedOpacity, onEmbedBlend, onRemoveEmbed, onHide, onUnhide, onRemoveControl, onRestoreControl, t }: InspectorProps): ReactNode {
   const [fontSize, setFontSize] = useState('')
   const [color, setColor] = useState('')
   const [bg, setBg] = useState('')
@@ -886,6 +1096,9 @@ function Inspector({ target, draft, onSample, onText, onRemove, onEmbedOpacity, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geek, target, geekSel, draft.css])
   const beforeRef = useRef('')
+  /** The element whose text node the override must target (undefined = nothing editable). */
+  const hostRef = useRef<Element | undefined>(undefined)
+  const [textIssue, setTextIssue] = useState<string | undefined>(undefined)
   const bgImageRef = useRef<HTMLInputElement | null>(null)
   const onEmbedBg = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const file = e.target.files?.[0]
@@ -921,22 +1134,34 @@ function Inspector({ target, draft, onSample, onText, onRemove, onEmbedOpacity, 
         lineHeight: d['line-height'] !== undefined, opacity: d['opacity'] !== undefined, shadow: d['box-shadow'] !== undefined,
         textAlign: d['text-align'] !== undefined,
       })
-      beforeRef.current = ''
-      setText('')
-      return
+    } else {
+      // No saved rule for this state yet: show the element's current appearance as baseline.
+      const css = getComputedStyle(target)
+      setFontSize(css.fontSize); setColor(css.color); setBg(css.backgroundColor); setWeight(css.fontWeight)
+      setRadius(css.borderRadius); setBorderColor(css.borderTopColor); setBorderWidth(css.borderTopWidth); setPadding(css.padding)
+      setWidth(css.width); setHeight(css.height); setMargin(css.margin); setLineHeight(css.lineHeight)
+      setOpacity(css.opacity); setShadow(css.boxShadow); setTextAlign(css.textAlign)
+      setBgImage(css.backgroundImage === 'none' ? '' : css.backgroundImage)
+      setTouched({})
     }
-    // No saved rule for this state yet: show the element's current appearance as baseline.
-    const css = getComputedStyle(target)
-    setFontSize(css.fontSize); setColor(css.color); setBg(css.backgroundColor); setWeight(css.fontWeight)
-    setRadius(css.borderRadius); setBorderColor(css.borderTopColor); setBorderWidth(css.borderTopWidth); setPadding(css.padding)
-    setWidth(css.width); setHeight(css.height); setMargin(css.margin); setLineHeight(css.lineHeight)
-    setOpacity(css.opacity); setShadow(css.boxShadow); setTextAlign(css.textAlign)
-    const direct = Array.from(target.childNodes).find((n) => n.nodeType === Node.TEXT_NODE && (n as Text).data.trim() !== '')
-    const isField = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
-    const raw = isField ? (target as HTMLInputElement).placeholder : (direct !== undefined ? (direct as Text).data : '')
+    // Text overrides are independent of the style rule, so this resolves on every
+    // selection: the node that actually holds editable text (the selection may be a
+    // wrapper whose label lives in a child, or an icon button with no text at all).
+    const host = textHostOf(target)
+    hostRef.current = host
+    const isField = host !== undefined && (host.tagName === 'INPUT' || host.tagName === 'TEXTAREA')
+    const direct = host === undefined
+      ? undefined
+      : Array.from(host.childNodes).find((n) => n.nodeType === Node.TEXT_NODE && (n as Text).data.trim() !== '')
+    const raw = host === undefined
+      ? ''
+      : isField
+        ? (host as HTMLInputElement).placeholder
+        : direct === undefined ? '' : (direct as Text).data
     beforeRef.current = raw.trim()
-    setText(raw.trim())
-    setTouched({})
+    const applied = host === undefined ? undefined : draft.text.find((o) => o.selector === selectorOf(host))
+    setText(applied !== undefined ? applied.after : raw.trim())
+    setTextIssue(undefined)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target])
 
@@ -992,11 +1217,24 @@ function Inspector({ target, draft, onSample, onText, onRemove, onEmbedOpacity, 
     if (decl !== '') onSample(selectorOf(target), decl)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fontSize, color, bg, bgImage, weight, radius, borderColor, borderWidth, padding, width, height, margin, lineHeight, opacity, shadow, textAlign, touched])
+  /**
+   * Apply the text box to the node that holds the text.
+   *
+   * The old version required a non-empty `before` and stayed silent otherwise, so
+   * selecting a wrapper (or an element whose text had whitespace) looked like the
+   * feature was missing. This targets the resolved host and always reports back.
+   */
   const applyText = (): void => {
-    if (text.trim() !== '' && beforeRef.current !== '' && text.trim() !== beforeRef.current) {
-      onText(selectorOf(target), beforeRef.current, text.trim())
-    }
+    const host = hostRef.current
+    const desired = text.trim()
+    if (host === undefined || desired === '') { setTextIssue(t('noEditableText')); return }
+    onText(selectorOf(host), beforeRef.current, desired)
+    setTextIssue(t('textApplied'))
   }
+  const sel = selectorOf(target)
+  const rule = draft.css.find((r) => r.selector === sel)?.rule
+  const hidden = rule !== undefined && /visibility\s*:\s*hidden/.test(rule)
+  const removed = rule !== undefined && /display\s*:\s*none/.test(rule)
 
   const fieldLabel: CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, fontSize: 12, lineHeight: '20px', width: '100%' }
 
@@ -1019,7 +1257,7 @@ function Inspector({ target, draft, onSample, onText, onRemove, onEmbedOpacity, 
       </div>
       {geek ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderBottom: '1px solid ' + tok.borderL2, paddingBottom: 8, marginBottom: 2 }}>
-          <label style={fieldLabel}>{t('target')}<Input value={geekSel} onChange={(e) => { setGeekSel(e.target.value) }} placeholder="#root > … :hover" /></label>
+          <label style={fieldLabel}>{t('target')}<Input value={geekSel} onChange={(e: ChangeEvent<HTMLInputElement>) => { setGeekSel(e.target.value) }} placeholder="#root > … :hover" /></label>
           <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('selectorHint')}</span>
           <CodeEditor value={geekCss} onChange={setGeekCss} />
 
@@ -1034,29 +1272,43 @@ function Inspector({ target, draft, onSample, onText, onRemove, onEmbedOpacity, 
         </div>
       ) : null}
       {geek ? null : (<>
-      <label style={fieldLabel}>字号<Input value={fontSize} onChange={(e) => { setFontSize(e.target.value); touch('fontSize') }} /></label>
-      <label style={fieldLabel}>颜色{colorType(color, setColor, 'color')}<Input value={color} onChange={(e) => { setColor(e.target.value); touch('color') }} /></label>
-      <label style={fieldLabel}>背景色{colorType(bg, setBg, 'bg')}<Input value={bg} onChange={(e) => { setBg(e.target.value); touch('bg') }} /></label>
-      <label style={fieldLabel}>背景图<Input value={bgImage} placeholder="url(...)/gradient" onChange={(e) => { setBgImage(e.target.value); touch('bgImage') }} /><Button style={btnBase} size="sm" variant="ghost" onClick={() => { bgImageRef.current?.click() }}>{t('embedBg')}</Button></label>
+      <label style={fieldLabel}>字号<Input value={fontSize} onChange={(e: ChangeEvent<HTMLInputElement>) => { setFontSize(e.target.value); touch('fontSize') }} /></label>
+      <label style={fieldLabel}>颜色{colorType(color, setColor, 'color')}<Input value={color} onChange={(e: ChangeEvent<HTMLInputElement>) => { setColor(e.target.value); touch('color') }} /></label>
+      <label style={fieldLabel}>背景色{colorType(bg, setBg, 'bg')}<Input value={bg} onChange={(e: ChangeEvent<HTMLInputElement>) => { setBg(e.target.value); touch('bg') }} /></label>
+      <label style={fieldLabel}>背景图<Input value={bgImage} placeholder="url(...)/gradient" onChange={(e: ChangeEvent<HTMLInputElement>) => { setBgImage(e.target.value); touch('bgImage') }} /><Button style={btnBase} size="sm" variant="ghost" onClick={() => { bgImageRef.current?.click() }}>{t('embedBg')}</Button></label>
       <input ref={bgImageRef} type="file" accept="image/*" multiple={false} style={{ display: 'none' }} onChange={onEmbedBg} />
-      <label style={fieldLabel}>字重<Input value={weight} onChange={(e) => { setWeight(e.target.value); touch('weight') }} /></label>
-      <label style={fieldLabel}>圆角<Input value={radius} onChange={(e) => { setRadius(e.target.value); touch('radius') }} /></label>
-      <label style={fieldLabel}>边框宽<Input value={borderWidth} placeholder="width" onChange={(e) => { setBorderWidth(e.target.value); touch('borderWidth') }} /></label>
-      <label style={fieldLabel}>边框色{colorType(borderColor, setBorderColor, 'borderColor')}<Input value={borderColor} placeholder="color" onChange={(e) => { setBorderColor(e.target.value); touch('borderColor') }} /></label>
-      <label style={fieldLabel}>内边距<Input value={padding} onChange={(e) => { setPadding(e.target.value); touch('padding') }} /></label>
-      <label style={fieldLabel}>宽<Input value={width} onChange={(e) => { setWidth(e.target.value); touch('width') }} /></label>
-      <label style={fieldLabel}>高<Input value={height} onChange={(e) => { setHeight(e.target.value); touch('height') }} /></label>
-      <label style={fieldLabel}>外边距<Input value={margin} onChange={(e) => { setMargin(e.target.value); touch('margin') }} /></label>
-      <label style={fieldLabel}>行高<Input value={lineHeight} onChange={(e) => { setLineHeight(e.target.value); touch('lineHeight') }} /></label>
-      <label style={fieldLabel}>不透明度<Input value={opacity} onChange={(e) => { setOpacity(e.target.value); touch('opacity') }} /></label>
-      <label style={fieldLabel}>阴影<Input value={shadow} onChange={(e) => { setShadow(e.target.value); touch('shadow') }} /></label>
-      <label style={fieldLabel}>文字对齐<Input value={textAlign} onChange={(e) => { setTextAlign(e.target.value); touch('textAlign') }} /></label>
-      <label style={fieldLabel}>文字内容<Input value={text} placeholder={beforeRef.current !== '' ? beforeRef.current : '输入新文字，点“编辑文字”替换'} onChange={(e) => { setText(e.target.value); touch('text') }} /></label>
+      <label style={fieldLabel}>字重<Input value={weight} onChange={(e: ChangeEvent<HTMLInputElement>) => { setWeight(e.target.value); touch('weight') }} /></label>
+      <label style={fieldLabel}>圆角<Input value={radius} onChange={(e: ChangeEvent<HTMLInputElement>) => { setRadius(e.target.value); touch('radius') }} /></label>
+      <label style={fieldLabel}>边框宽<Input value={borderWidth} placeholder="width" onChange={(e: ChangeEvent<HTMLInputElement>) => { setBorderWidth(e.target.value); touch('borderWidth') }} /></label>
+      <label style={fieldLabel}>边框色{colorType(borderColor, setBorderColor, 'borderColor')}<Input value={borderColor} placeholder="color" onChange={(e: ChangeEvent<HTMLInputElement>) => { setBorderColor(e.target.value); touch('borderColor') }} /></label>
+      <label style={fieldLabel}>内边距<Input value={padding} onChange={(e: ChangeEvent<HTMLInputElement>) => { setPadding(e.target.value); touch('padding') }} /></label>
+      <label style={fieldLabel}>宽<Input value={width} onChange={(e: ChangeEvent<HTMLInputElement>) => { setWidth(e.target.value); touch('width') }} /></label>
+      <label style={fieldLabel}>高<Input value={height} onChange={(e: ChangeEvent<HTMLInputElement>) => { setHeight(e.target.value); touch('height') }} /></label>
+      <label style={fieldLabel}>外边距<Input value={margin} onChange={(e: ChangeEvent<HTMLInputElement>) => { setMargin(e.target.value); touch('margin') }} /></label>
+      <label style={fieldLabel}>行高<Input value={lineHeight} onChange={(e: ChangeEvent<HTMLInputElement>) => { setLineHeight(e.target.value); touch('lineHeight') }} /></label>
+      <label style={fieldLabel}>不透明度<Input value={opacity} onChange={(e: ChangeEvent<HTMLInputElement>) => { setOpacity(e.target.value); touch('opacity') }} /></label>
+      <label style={fieldLabel}>阴影<Input value={shadow} onChange={(e: ChangeEvent<HTMLInputElement>) => { setShadow(e.target.value); touch('shadow') }} /></label>
+      <label style={fieldLabel}>文字对齐<Input value={textAlign} onChange={(e: ChangeEvent<HTMLInputElement>) => { setTextAlign(e.target.value); touch('textAlign') }} /></label>
+      <strong style={{ fontSize: 13, lineHeight: '20px', fontWeight: 500, color: tok.labelSecondary }}>{t('elementActions')}</strong>
+      <label style={fieldLabel}>{t('editText')}<Input value={text} placeholder={beforeRef.current !== '' ? beforeRef.current : t('noEditableText')} onChange={(e: ChangeEvent<HTMLInputElement>) => { setText(e.target.value); touch('text') }} /></label>
+      <span style={{ fontSize: 11, lineHeight: '16px', color: textIssue !== undefined && textIssue !== t('textApplied') ? 'var(--dsw-alias-state-warn-primary)' : tok.labelTertiary }}>
+        {t('textWhere')}: {hostRef.current === undefined ? '—' : selectorOf(hostRef.current)}{textIssue === undefined ? '' : ' · ' + textIssue}
+      </span>
+      {hidden || removed ? (
+        <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>
+          {hidden ? t('hiddenBadge') : ''}{hidden && removed ? ' · ' : ''}{removed ? t('removedBadge') : ''}
+        </span>
+      ) : null}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <Button style={btnBase} variant="outline" onClick={applyText}>{t('editText')}</Button>
-
-        <Button style={btnBase} variant="ghost" onClick={() => { onHide(selectorOf(target)) }}>{t('hide')}</Button>
-        <Button style={btnBase} variant="ghost" icon={<IconTrash size={16} />} onClick={() => { onRemove(selectorOf(target)) }}>{t('remove')}</Button>
+        <Button style={btnBase} variant="ghost" disabled={hostRef.current === undefined} onClick={() => { const host = hostRef.current; if (host !== undefined) onRemoveText(selectorOf(host)) }}>{t('textRevert')}</Button>
+        {hidden
+          ? <Button style={btnBase} variant="outline" onClick={() => { onUnhide(sel) }}>{t('unhide')}</Button>
+          : <Button style={btnBase} variant="ghost" onClick={() => { onHide(sel) }}>{t('hide')}</Button>}
+        {removed
+          ? <Button style={btnBase} variant="outline" onClick={() => { onRestoreControl(sel) }}>{t('restoreControl')}</Button>
+          : <Button style={btnBase} variant="ghost" icon={<IconTrash size={16} />} onClick={() => { onRemoveControl(sel) }}>{t('removeControl')}</Button>}
+        <Button style={btnBase} variant="ghost" onClick={() => { onRemove(sel) }}>{t('clearElement')}</Button>
       </div>
       </>)}
 
@@ -1202,19 +1454,5 @@ function TokenPanel({ tokens, onToggle, onChange, t }: TokenPanelProps): ReactNo
   )
 }
 
-/** Build a structural selector for a real DSH node, relative to the app root. */
-function selectorOf(el: Element): string {
-  if (el.id !== '') return '#' + CSS.escape(el.id)
-  const parts: string[] = []
-  const root = el.ownerDocument.getElementById('root') as HTMLElement | null
-  let node: Element | null = el
-  while (node !== null && node !== root && node.parentElement !== null) {
-    const parent = node.parentElement
-    const sameTag = Array.from(parent.children).filter((c) => c.tagName === node!.tagName)
-    const idx = sameTag.indexOf(node) + 1
-    const name = node.tagName.toLowerCase()
-    parts.unshift(idx > 1 ? (name + ':nth-of-type(' + idx + ')') : name)
-    node = parent
-  }
-  return '#root > ' + parts.join(' > ')
-}
+// selectorOf() lives in skin-engine.ts: it is portal-aware (dialogs and menus mount
+// beside #root) and unit-tested there.
