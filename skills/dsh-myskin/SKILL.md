@@ -14,7 +14,8 @@ DSH **通用皮肤框架**：可视化自定义 + 实时预览 + 「皮肤管理
 
 - 形态：**profile bundle**。包内 `cordis.patch.yml` 声明条目 `id: dsh-myskin`，由该 profile 的 `dsh.profile.bundles` 选中。
 - 目标 profile：Web = `$DSH_HOME/profiles/web`，Desktop = `$DSH_HOME/profiles/desktop`；**两者各装一次，皮肤文档互不共享**。
-- 装法：把包放进 `<profile>/node_modules/dsh-myskin`（拷贝或软链，**目录名必须是包名**），再把 `"dsh-myskin"` 追加进 `dsh.profile.bundles`；`patchReload: live` 时保存即热加载（否则重启 DSH，重启交给用户）。
+- **首选装法（界面）**：DSH 的 **设置 → 插件 → 添加插件**，填 **GitHub 仓库地址**（`https://github.com/WTStarMark/dsh-myskin`，可带 `#v0.3.8`）、npm 包名或**本地目录路径**；安装由 **pnpm** 执行，成功后插件管理器会**自动**把包名写进该 profile 的 `dsh.profile.bundles`。界面明确提示：插件**不支持自动更新**，升级要**先卸载再安装**。
+- **离线装法**：把包放进 `<profile>/node_modules/dsh-myskin`（拷贝或软链，**目录名必须是包名**），再把 `"dsh-myskin"` 追加进 `dsh.profile.bundles`；`patchReload: live` 时保存即热加载（否则重启 DSH，重启交给用户）。
 - `lib/index.js` **自带 schemastery**（0.3.1 起不再 external），所以「解压/拷贝/软链」三种装法都不需要 node_modules。宿主半区自检：`node --input-type=module -e "const m = await import('<pkg>/lib/index.js'); console.log(Object.keys(m))"` → `[ 'Config', 'apply', 'name' ]`。
 - **写 profile 文件属工作区外写入**：动手前先说明影响并取得用户确认。
 

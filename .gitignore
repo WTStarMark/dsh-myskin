@@ -1,7 +1,9 @@
 # ── 依赖与构建中间产物 ─────────────────────────────────────────────
-# lib/ 与 package-lock.json 是交付物，必须提交；下面这些不是。
+# lib/（构建产物）是交付物，必须提交；下面这些不是。
 node_modules/
 .tmp/
+# 锁文件不入库：插件本体自带依赖，开发时各自 npm install 生成即可。
+package-lock.json
 *.tsbuildinfo
 *.tgz
 

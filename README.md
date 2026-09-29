@@ -112,97 +112,75 @@
 
 ## 安装（最新版 DSH）
 
-> 目标是给**已经装好并能启动**的 DSH 加一个第三方插件。本插件以 **profile bundle** 形态装载：包放进 profile 的 `node_modules`，再在 profile 的 `package.json` 里声明一次。
+> 给**已经装好并能启动**的 DSH 加一个第三方插件。本插件是 **profile bundle**（包内自带 `cordis.patch.yml`，声明条目 `dsh-myskin`），所以只需要"装进某个 profile + 在它的 `dsh.profile.bundles` 里声明一次"。
 
-### 0. 前置
+### 方式一：用 DSH 内置的「添加插件」（推荐）
 
-- DSH 已安装并可启动（`dsh web` 或桌面版）。
-- 知道你的 **DSH_HOME**：默认 `~/.dsh`（可用环境变量 `DSH_HOME` 覆盖）。
-- 选目标 profile：
-  - Web：`$DSH_HOME/profiles/web`
-  - Desktop：`$DSH_HOME/profiles/desktop`
-  - **两个 profile 各装一次**（Web 与 Desktop 的皮肤互不共享）。
+打开 **设置 → 插件（Plugins）→ 添加插件**，在输入框里填下面任意一种，选好安装源，点「安装」：
 
-### 1. 拿到并解压插件包
+| 输入 | 例子 | 说明 |
+|---|---|---|
+| GitHub 仓库地址 | `https://github.com/WTStarMark/dsh-myskin` | 走 git 安装；也可写 `github:WTStarMark/dsh-myskin`，需要固定版本就加 `#v0.3.8` |
+| npm 包名 | `dsh-myskin` | 走所选**安装源**（`registry.npmmirror.com` = 中国大陆镜像源） |
+| 本地目录路径 | `~/dsh-plugins/dsh-myskin-0.3.8` | 等价于 `link:`，改源码即时生效 |
 
-从 Releases 下载 `dsh-myskin-0.3.8.zip`，解压后是一个 `dsh-myskin-0.3.8/` 目录。
+- 「安装源」只影响 npm 包；填 GitHub 地址时走 git，不受它影响。
+- 安装由 **pnpm** 执行，机器上需要有 `pnpm`。
+- 安装完成后，插件管理器会**自动**把 `dsh-myskin` 写进**当前 profile** 的 `dsh.profile.bundles`——不需要手改配置文件。
+- 请注意界面上的提醒：**插件暂不支持自动更新**；升级请先在插件页**卸载**，再安装新版本。
+- 只想给桌面端装，就在桌面版里对同一个地址再装一次（Web 与 Desktop 是两个 profile，皮肤文档也各自独立）。
 
-```bash
-mkdir -p ~/dsh-plugins && cd ~/dsh-plugins
-# 有 unzip 就用 unzip；没有就用 python3（zip 是标准格式）
-unzip ~/Downloads/dsh-myskin-0.3.8.zip -d .
-# 或：
-python3 -c "import zipfile; zipfile.ZipFile('$HOME/Downloads/dsh-myskin-0.3.8.zip').extractall('.')"
-```
+### 方式二：离线 / 手动安装（用打包好的 zip）
 
-### 2. 放进 profile（目录名必须是 `dsh-myskin`）
+1. 解压插件包 `dsh-myskin-0.3.8.zip`：
 
-```bash
-DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
-PROFILE="$DSH_HOME/profiles/web"        # 桌面版改成 profiles/desktop
-mkdir -p "$PROFILE/node_modules"
+   ```bash
+   # 有 unzip 就用它；没有就用 python3（zip 是标准格式）
+   python3 -c "import zipfile; zipfile.ZipFile('dsh-myskin-0.3.8.zip').extractall('$HOME/dsh-plugins')"
+   ```
 
-# 拷贝（稳定，改包后需重新拷贝）
-cp -r ~/dsh-plugins/dsh-myskin-0.3.8 "$PROFILE/node_modules/dsh-myskin"
+2. 放进目标 profile（**目录名必须是 `dsh-myskin`**）：
 
-# 或者软链到源码/解压目录（改包即时生效，适合长期维护）
-# ln -sfn ~/dsh-plugins/dsh-myskin-0.3.8 "$PROFILE/node_modules/dsh-myskin"
-```
+   ```bash
+   DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+   PROFILE="$DSH_HOME/profiles/web"          # 桌面版改成 profiles/desktop
+   mkdir -p "$PROFILE/node_modules"
+   cp -r ~/dsh-plugins/dsh-myskin-0.3.8 "$PROFILE/node_modules/dsh-myskin"
+   # 或软链（改包即时生效）：ln -sfn ~/dsh-plugins/dsh-myskin-0.3.8 "$PROFILE/node_modules/dsh-myskin"
+   ```
 
-### 3. 在 profile 里声明 bundle
+3. 在 `$PROFILE/package.json` 的 `dsh.profile.bundles` 末尾**追加** `"dsh-myskin"`（不要删掉原有条目）：
 
-编辑 `$PROFILE/package.json`，在 `dsh.profile.bundles` 数组**末尾追加** `"dsh-myskin"`（**不要删掉原有条目**）：
+   ```json
+   {
+     "dsh": {
+       "profile": {
+         "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-myskin"],
+         "patchReload": "live"
+       }
+     }
+   }
+   ```
 
-```json
-{
-  "dsh": {
-    "profile": {
-      "bundles": [
-        "@deepseek-ai/dsh-base",
-        "@deepseek-ai/dsh-web-app",
-        "dsh-myskin"
-      ],
-      "patchReload": "live"
-    }
-  }
-}
-```
+4. 生效：`patchReload: live` 时保存后**刷新页面**即可；没反应就**重启 DSH**（由你操作，本插件从不重启 DSH）。
 
-### 4. 生效
+### 装上了吗
 
-- `patchReload: live`（Web profile 默认）：保存 `package.json` 后 Host 会重新读取，通常**刷新页面**即可看到。
-- 没反应就**重启 DSH**（由你操作；本插件从不重启 DSH）。
+1. **设置**里出现 **「皮肤管理」** → 成功。
+2. 只用命令行确认宿主半区（把 `<pkg>` 换成实际安装目录）：
 
-### 5. 确认装好了
-
-1. 打开 **设置**，左侧出现 **「皮肤管理」** → 成功。
-2. 想只用命令行确认宿主半区没问题：
-
-```bash
-node --input-type=module -e "const m = await import('$PROFILE/node_modules/dsh-myskin/lib/index.js'); console.log(Object.keys(m))"
-# 期望输出：[ 'Config', 'apply', 'name' ]
-```
-
-### 其它安装方式
-
-- **用包管理器装进 profile**（等价于上面 2 步，顺便记进依赖）：
-  ```bash
-  pnpm --dir "$PROFILE" add "file:$HOME/dsh-plugins/dsh-myskin-0.3.8"
-  # 或指向本机目录（改包即时生效）：pnpm --dir "$PROFILE" add "link:/path/to/dsh-myskin"
-  ```
-  第 3 步的 `dsh.profile.bundles` 仍需手动追加。
-- **Web 侧栏的 Plugins 页**：按界面提示安装 bundle。
+   ```bash
+   node --input-type=module -e "const m = await import('<pkg>/lib/index.js'); console.log(Object.keys(m))"
+   # 期望输出：[ 'Config', 'apply', 'name' ]
+   ```
 
 ### 卸载 / 回滚
 
-1. 从 `dsh.profile.bundles` 移除 `"dsh-myskin"`；
-2. 删除 `$PROFILE/node_modules/dsh-myskin`（或解除软链）；
-3. 刷新页面或重启 DSH。
-
-皮肤文档仍留在该 profile 的 `cordis.patch.yml` 里；想彻底清干净，可在移除插件前先「导出皮肤」备份，再删掉该条目。
+- **用界面装的**：插件页对该插件选「卸载」（它同时会从 `dsh.profile.bundles` 移除）。
+- **手动装的**：从 `dsh.profile.bundles` 移除 `"dsh-myskin"`，删掉 `$PROFILE/node_modules/dsh-myskin`（或解除软链），刷新页面或重启 DSH。
+- 皮肤文档仍留在该 profile 的 `cordis.patch.yml` 里；想彻底清干净，先「导出皮肤」备份，再删掉该条目。
 
 ---
-
 ## 快速上手
 
 1. **设置 →「皮肤管理」**：选一个预设主题 → 点 **应用**。
