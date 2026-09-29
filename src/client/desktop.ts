@@ -68,11 +68,39 @@ export function readDesktopShell(doc?: Document): DesktopShell {
  * Both platforms get an explicit `no-drag` on plugin UI: Electron composes
  * app-regions from geometry in document order, and the shell only subtracts
  * overlays on darwin (`html[data-platform='darwin'] body > :not(#root)`).
+ *
+ * Two rules are shell-independent and both are about upstream modals: they portal to
+ * `<body>` far below this layer's z-index, so the settings dialog used to open *behind* the
+ * toolbar and the right panel. The fix is the same rule the app itself follows — the modal
+ * layer is inset by the space the chrome occupies, so the dialog lays out in the app area
+ * and the user keeps drawing with the dialog open.
  * @param shell - the shell the document reported when the editor opened.
  * @returns the rules to write, in order.
  */
 export function editorFrameRules(shell: DesktopShell): string[] {
   const rules: string[] = []
+  // Upstream modals portal to <body> as one full-viewport layer (`position: fixed; inset: 0`,
+  // z-index 1000) while the drawing chrome sits at 9999, so the settings dialog opened UNDER
+  // the toolbar and the right panel — a modal that visibly did not follow the same layout
+  // rule as the app behind it. Hiding the chrome is NOT the answer: the user is still
+  // drawing and needs the toolbar and the panel. Instead the modal layer is inset by exactly
+  // the space the chrome occupies, so it lays out inside the app area: both stay visible and
+  // clickable (upstream's `useModalLayer` only traps Tab and Escape, not the pointer), and
+  // the mask covers just the app area.
+  // `data-shortcut-modal` marks the settings surface (and ui-shortcuts the shortcut editor);
+  // `:has()` is load-bearing upstream too (`.wSkVaW_header:where(:not(:has(.wSkVaW_tabs)))`).
+  rules.push('body > :not(#root):not([data-dsh-myskin-ui]):has([data-shortcut-modal]) {')
+  rules.push('  top: calc(var(--dsh-myskin-chrome-top, 0px) + var(--dsh-myskin-inset-top, 48px)) !important;')
+  rules.push('  right: var(--dsh-myskin-inset-right, 340px) !important;')
+  rules.push('}')
+  // The panel sizes itself against the viewport (`height: min(800px, calc(100vh - …))`,
+  // `max-width: calc(100vw - 48px)`); inside an inset layer those no longer describe the box
+  // it lives in, so it is capped against the same insets and can never slide back under the
+  // chrome. The 240px floor keeps it usable in a short window.
+  rules.push('[data-shortcut-modal="settings"] {')
+  rules.push('  height: min(800px, max(240px, calc(100vh - var(--dsh-myskin-chrome-top, 0px) - var(--dsh-myskin-inset-top, 48px) - 48px))) !important;')
+  rules.push('  max-width: calc(100vw - var(--dsh-myskin-inset-right, 340px) - 48px) !important;')
+  rules.push('}')
   if (shell.desktop) {
     if (shell.windowsTitlebar) {
       // Always the height the frame itself pads its caption row with, in

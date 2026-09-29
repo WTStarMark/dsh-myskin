@@ -243,7 +243,7 @@ test('hide and remove declarations keep the element’s other customizations', (
   assert.equal(engine.withoutDeclaration(rule, 'visibility'), 'color: red')
 })
 
-test('a desktop wallpaper tints the shell exactly once', () => {
+test('a desktop wallpaper tints the shell exactly once, on the surface that owns the corner', () => {
   const window = setup()
   window.document.documentElement.setAttribute('data-windows-titlebar', '')
   window.document.body.innerHTML = '<div class="app_frame_hash"><div class="app_centerCol_hash"></div></div>'
@@ -261,12 +261,20 @@ test('a desktop wallpaper tints the shell exactly once', () => {
   }
   const override = engine.applySkin(theme, skin)
   const css = window.document.getElementById('dsh-myskin-rule').textContent
-  // The frame carries the only tint (gradient above the image) and the conversation
-  // column stops painting its own copy: stacking both made the strength slider
-  // visibly useless.
+  // The conversation column carries the wallpaper and the only tint (gradient above the
+  // image), and gives up its own colour in the same rule; the frame keeps DSH's own
+  // surface, which fills the rounded notch.
   assert.equal((css.match(/linear-gradient\(rgba\(/g) ?? []).length, 1)
-  assert.match(css, /\[class\*="_centerCol"\], \[class~="centerCol"\] \{ background-color: transparent !important; \}/)
+  assert.match(css, /\[class\*="_centerCol"\], \[class~="centerCol"\] \{ background-image: linear-gradient\(rgba\(255, 255, 255, 0\.6\), rgba\(255, 255, 255, 0\.6\)\), url\("data:image\/gif;base64,R0lGODlhAQABAAAAACw="\) !important; background-size: cover !important; background-position: center !important; background-attachment: fixed !important; background-color: transparent !important; \}/)
+  assert.doesNotMatch(css, /\[class\*="_frame"\][^{]*\{ background-image/)
   assert.match(css, /--dsw-alias-bg-base: rgba\(255, 255, 255, 0\.6\)/)
+  // ONE canvas surface per pixel inside the column: its chrome is denied the token…
+  assert.match(css, /\[class\*="_centerCol"\], \[class~="centerCol"\] \{ --dsw-alias-bg-base: transparent !important; \}/)
+  // …the content a conversation slot renders gets it back, so its cards stay crisp…
+  // (not anchored at the end: the seat rule is emitted after this one)
+  assert.match(css, /\[class\*="_centerCol"\] \[data-slot="conversation\.session"\], \[class\*="_centerCol"\] \[data-slot\^="conversation\.view"\], \[class~="centerCol"\] \[data-slot="conversation\.session"\], \[class~="centerCol"\] \[data-slot\^="conversation\.view"\] \{ --dsw-alias-bg-base: rgba\(255, 255, 255, 0\.6\) !important; \}/)
+  // …and the composer seat stops painting the fade that stacked a third veil there.
+  assert.match(css, /\[class\*="_centerCol"\] \[data-composer-seat\], \[class\*="_centerCol"\] \[class\*="_composerSeat"\], \[class\*="_centerCol"\] \[class~="composerSeat"\], \[class~="centerCol"\] \[data-composer-seat\], \[class~="centerCol"\] \[class\*="_composerSeat"\], \[class~="centerCol"\] \[class~="composerSeat"\] \{ background: none !important; --dsw-alias-bg-base: rgba\(255, 255, 255, 0\.6\) !important; \}$/)
   override.dispose()
   assert.equal(window.document.body.outerHTML, before)
 })
@@ -279,4 +287,191 @@ test('an empty skin is inert', () => {
   assert.equal(window.document.body.outerHTML, before)
   override.dispose()
   assert.equal(window.document.body.outerHTML, before)
+})
+
+test('the conversation chrome inside the column never paints a second canvas surface', () => {
+  const window = setup()
+  window.document.documentElement.setAttribute('data-windows-titlebar', '')
+  window.document.body.style.backgroundColor = '#ffffff'
+  // The real upstream surface rules, so the token each element consumes is the token
+  // upstream would paint. jsdom resolves the custom-property cascade (but not var()
+  // inside shorthand values), and that cascade IS the mechanism under test: one slider
+  // value must leave exactly ONE canvas surface per pixel.
+  window.document.head.insertAdjacentHTML('beforeend', [
+    '<style>',
+    '[data-windows-titlebar] .pI_x6G_frame{background:var(--dsw-specific-sidebar-fill)}',
+    '[data-windows-titlebar] .pI_x6G_centerCol{background:var(--dsw-alias-bg-base);border-radius:var(--dsh-windows-content-radius) 0 0 0}',
+    '.wSkVaW_root{background:var(--dsw-alias-bg-base)}',
+    '.wSkVaW_root[data-phase=active] .wSkVaW_composerSeat{background:linear-gradient(180deg, color-mix(in srgb, var(--dsw-alias-bg-base) 0%, transparent) 0px, var(--dsw-alias-bg-base) 36px)}',
+    '</style>',
+  ].join(''))
+  window.document.body.innerHTML = [
+    '<div id="root"><div class="pI_x6G_frame"><div class="pI_x6G_centerCol">',
+    '<div class="wSkVaW_root" data-phase="active">',
+    // The header is rendered THROUGH a slot (conversation.session.header): handing the
+    // token back to every "conversation." slot would give the top bar its canvas surface
+    // back and quietly undo the whole fix.
+    '<div data-slot="conversation.session.header"><header class="wSkVaW_header"></header></div>',
+    '<div class="wSkVaW_scrollBody">',
+    '<div data-slot="conversation.session"><div data-slot="conversation.view">',
+    '<div class="fsXYAq_card" style="background: var(--dsw-alias-bg-base)"></div>',
+    '</div></div>',
+    // The seat carries its own stable marker, so it is neutralized by selector while its
+    // cards keep the surface.
+    '<div class="wSkVaW_composerSeat" data-composer-seat="" data-conversation-region="composer">',
+    '<div class="lXshSW_root" style="background: var(--dsw-alias-bg-base)"></div>',
+    '</div>',
+    '</div>',
+    '</div>',
+    '</div></div>',
+  ].join('')
+  const theme = fakeTheme()
+  const skin = {
+    enabled: true,
+    tokens: {},
+    css: [],
+    text: [],
+    canvas: { background: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=', backgroundOpacity: 0.6, images: [] },
+    layers: [],
+    library: [],
+  }
+  const override = engine.applySkin(theme, skin)
+  const doc = window.document
+  const token = (selector) => window.getComputedStyle(doc.querySelector(selector)).getPropertyValue('--dsw-alias-bg-base').trim()
+  const canvas = 'rgba(255, 255, 255, 0.6)'
+  // jsdom resolves the custom-property cascade but does NOT inherit custom properties, so
+  // these assertions read what each element *declares* — which is the part that can
+  // silently break (specificity against the body rule, and the slot allow-list). The
+  // inherited half (the conversation root and the header element see the column's
+  // `transparent`) is pinned by the CSS-text assertions in the wallpaper test above.
+  assert.equal(token('.pI_x6G_centerCol'), 'transparent')
+  // The content a view renders gets the surface back for its cards…
+  assert.equal(token('[data-slot="conversation.session"]'), canvas)
+  // …the composer seat hands it to its cards too…
+  assert.equal(token('[data-composer-seat]'), canvas)
+  // …and the header's slot must NOT: it is a conversation slot as well, and handing the
+  // token back there is exactly how the top bar would regain its second canvas surface.
+  assert.equal(token('[data-slot="conversation.session.header"]'), '')
+  // The seat's own fade is neutralized by the `background: none !important` rule pinned in
+  // the CSS-text assertions above (jsdom cannot compute background-image through the
+  // `color-mix()` shorthand upstream uses, so reading it here would prove nothing).
+  override.dispose()
+  assert.equal(doc.querySelector('style[data-plugin-css="dsh-myskin-rule"]'), null)
+})
+
+test('the structural fallback re-tags, but never paints directly', () => {
+  const window = setup()
+  window.document.body.innerHTML = '<div id="root"><div class="sidebar_hash"><div class="workspace_hash"><div class="panel_hash" id="target"></div></div></div></div>'
+  const doc = window.document
+  const fallback = '#root > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1)'
+  const escaped = fallback.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const theme = fakeTheme()
+  const skin = {
+    enabled: true,
+    tokens: {},
+    css: [],
+    text: [],
+    layers: [],
+    library: [],
+    canvas: {
+      background: undefined,
+      images: [{
+        id: 'e1',
+        selector: '[data-dsh-myskin-embed="e1"]',
+        fallbackSelector: fallback,
+        url: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+        x: 0,
+        y: 0,
+        w: 40,
+        h: 20,
+      }],
+    },
+  }
+  const override = engine.applySkin(theme, skin)
+  const css = doc.getElementById('dsh-myskin-rule').textContent
+  // A positional path points at a look-alike the moment React shifts a sibling, so the
+  // stylesheet only ever paints the transient tag; identity is re-established by the
+  // engine (see the two re-tag tests below), never by the fallback path itself.
+  assert.doesNotMatch(css, new RegExp(escaped + ' \\{ position: relative; \\}'))
+  assert.match(css, /\[data-dsh-myskin-embed="e1"\] \{ position: relative; \}/)
+  assert.match(css, /\[data-dsh-myskin-embed="e1"\]::after \{ content: ''/)
+  assert.equal(doc.getElementById('target').getAttribute('data-dsh-myskin-embed'), 'e1')
+  override.dispose()
+})
+
+test('an embedded image is re-tagged after React rebuilds the node somewhere else', async () => {
+  const window = setup()
+  window.document.body.innerHTML = '<div id="root"><div class="sidebar_hash"><div class="workspace_hash"><div class="panel_hash" id="target"></div></div></div></div>'
+  const doc = window.document
+  const theme = fakeTheme()
+  const skin = {
+    enabled: true,
+    tokens: {},
+    css: [],
+    text: [],
+    layers: [],
+    library: [],
+    canvas: {
+      background: undefined,
+      images: [{
+        id: 'e1',
+        selector: '[data-dsh-myskin-embed="e1"]',
+        fallbackSelector: '#root > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1)',
+        url: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+        x: 0,
+        y: 0,
+        w: 40,
+        h: 20,
+      }],
+    },
+  }
+  const override = engine.applySkin(theme, skin)
+  assert.equal(doc.getElementById('target').getAttribute('data-dsh-myskin-embed'), 'e1')
+
+  // A sidebar collapse/expand remounts the virtualized panel: the old node is gone and the
+  // new one sits at a different sibling index, so the stored path matches nothing. The
+  // engine must recognise the rebuilt element by what it looked like, not by the path.
+  const rebuilt = doc.createElement('div')
+  rebuilt.className = 'panel_hash'
+  doc.getElementById('target').remove()
+  doc.querySelector('.workspace_hash').appendChild(rebuilt)
+  await new Promise((resolve) => { setTimeout(resolve, 0) })
+  assert.equal(rebuilt.getAttribute('data-dsh-myskin-embed'), 'e1')
+  override.dispose()
+})
+
+test('an embedded image still tags when its selector matches several nodes', async () => {
+  const window = setup()
+  window.document.body.innerHTML = '<div id="root"><div class="workspace_hash"><div class="panel_hash" id="first"></div><div class="panel_hash" id="second" style="display: none"></div></div></div>'
+  const doc = window.document
+  const theme = fakeTheme()
+  const skin = {
+    enabled: true,
+    tokens: {},
+    css: [],
+    text: [],
+    layers: [],
+    library: [],
+    canvas: {
+      background: undefined,
+      images: [{
+        id: 'e1',
+        selector: '[data-dsh-myskin-embed="e1"]',
+        fallbackSelector: '.panel_hash',
+        url: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+        x: 0,
+        y: 0,
+        w: 40,
+        h: 20,
+      }],
+    },
+  }
+  const override = engine.applySkin(theme, skin)
+  await new Promise((resolve) => { setTimeout(resolve, 0) })
+  // Two matches used to mean "give up and tag nothing" — exactly what a collapsing sidebar
+  // produced (rail + panel mounted at once). One of them must be tagged.
+  const tagged = doc.querySelectorAll('[data-dsh-myskin-embed="e1"]')
+  assert.equal(tagged.length, 1)
+  assert.equal(tagged[0].id, 'first')
+  override.dispose()
 })

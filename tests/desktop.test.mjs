@@ -40,6 +40,14 @@ test('a plain browser reports no desktop shell and keeps the web editor inset', 
   const shell = desktop.readDesktopShell(window.document)
   assert.deepEqual(shell, { desktop: false, platform: undefined, windowsTitlebar: false, fullscreen: false })
   const rules = desktop.editorFrameRules(shell).join('\n')
+  // Upstream modals lay out inside the app area on every shell: the settings dialog portals
+  // to <body> far below the chrome's z-index and used to open *behind* it. Hiding the chrome
+  // would take the toolbar and panel away from a user who is still drawing, so the modal
+  // layer is inset by exactly the space they occupy instead.
+  assert.match(rules, /^body > :not\(#root\):not\(\[data-dsh-myskin-ui\]\):has\(\[data-shortcut-modal\]\) \{$/m)
+  assert.match(rules, /^ {2}top: calc\(var\(--dsh-myskin-chrome-top, 0px\) \+ var\(--dsh-myskin-inset-top, 48px\)\) !important;$/m)
+  assert.match(rules, /^ {2}right: var\(--dsh-myskin-inset-right, 340px\) !important;$/m)
+  assert.doesNotMatch(rules, /data-dsh-myskin-canvas\] \{ display: none/)
   assert.match(rules, /margin-top: var\(--dsh-myskin-inset-top, 48px\)/)
   assert.match(rules, /#root \{ height: 100% !important; \}/)
   assert.doesNotMatch(rules, /app-region/)
@@ -114,29 +122,48 @@ test('a transparent desktop shell tints the frame so the strength slider still w
   const rules = engine.backgroundSurfaceRules(window.document, 0.8, tint)
   assert.match(rules[0], /^\[class\*="_frame"\], \[class~="frame"\] \{ background-color: rgba\(16, 16, 16, 0\.8\) !important; \}$/)
   assert.match(rules[1], /--dsw-alias-bg-layer-1: rgba\(16, 16, 16, 0\.95\)/)
-  // Dialogs and menus never move, on either shell.
-  assert.equal(rules.length, 2)
+  // Dialogs and menus never move, on either shell; the conversation column is left with
+  // exactly ONE canvas surface, so its chrome may not paint the token a second time
+  // (that stacking is what gave the top bar, the transcript and the send bar three
+  // different transparencies for one slider value).
+  assert.equal(rules.length, 5)
+  assert.match(rules[2], /^\[class\*="_centerCol"\], \[class~="centerCol"\] \{ --dsw-alias-bg-base: transparent !important; \}$/)
+  assert.match(rules[3], /\[class\*="_centerCol"\] \[data-slot="conversation\.session"\], \[class\*="_centerCol"\] \[data-slot\^="conversation\.view"\], \[class~="centerCol"\] \[data-slot="conversation\.session"\], \[class~="centerCol"\] \[data-slot\^="conversation\.view"\] \{ --dsw-alias-bg-base: rgba\(16, 16, 16, 0\.8\) !important; \}$/)
+  assert.match(rules[4], /\[class\*="_centerCol"\] \[data-composer-seat\], \[class\*="_centerCol"\] \[class\*="_composerSeat"\], \[class\*="_centerCol"\] \[class~="composerSeat"\], \[class~="centerCol"\] \[data-composer-seat\], \[class~="centerCol"\] \[class\*="_composerSeat"\], \[class~="centerCol"\] \[class~="composerSeat"\] \{ background: none !important; --dsw-alias-bg-base: rgba\(16, 16, 16, 0\.8\) !important; \}$/)
 })
 
-test('the desktop wallpaper is painted on the frame that owns the rounded corner', () => {
+test('the windows wallpaper is painted on the column that owns the rounded corner', () => {
   const window = setup('data-windows-titlebar=""', WITH_FRAME)
   window.document.querySelector('[class*="_frame"]').style.backgroundColor = '#ffffff'
   const rules = engine.wallpaperRules(window.document, 'data:image/gif;base64,AAA')
+  // Page canvas + the conversation column. The column is the element DSH rounds and
+  // clips, so the wallpaper is cut by that corner instead of running across the notch,
+  // and the column gives up its own colour in the same rule.
   assert.equal(rules.length, 2)
   assert.match(rules[0], /^body \{ background-image: url\("data:image\/gif;base64,AAA"\)/)
-  assert.match(rules[1], /^\[class\*="_frame"\], \[class~="frame"\] \{ background-image: url\("data:image\/gif;base64,AAA"\)/)
-  // Leaving the frame transparent exposed the native window colour (#1b1b1c) in the
-  // conversation column's rounded top-left corner: that rule must be gone.
-  const surface = engine.backgroundSurfaceRules(window.document, 0.8)
-  assert.equal(surface.some((rule) => rule.includes('background-color: transparent')), false)
-  // One tint, applied once, on the frame: the gradient rides above the image and the
-  // conversation column stops painting its own copy, so the strength slider moves the
-  // visible wallpaper instead of being stacked twice.
+  assert.match(rules[1], /^\[class\*="_centerCol"\], \[class~="centerCol"\] \{ background-image: url\("data:image\/gif;base64,AAA"\)/)
+  assert.match(rules[1], /background-color: transparent !important; \}$/)
+  // The frame keeps DSH's own opaque surface: THAT is what fills the 16px notch now
+  // (a wallpapered frame filled it with the image and erased the rounding, a
+  // transparent one exposed Electron's window colour as a black notch).
   const tinted = engine.wallpaperRules(window.document, 'data:image/gif;base64,AAA', { rgb: '255, 255, 255', base: 0.75, panel: 0.9, target: 'token' })
-  assert.equal(tinted.length, 3)
-  assert.match(tinted[1], /^\[class\*="_frame"\], \[class~="frame"\] \{ background-image: linear-gradient\(rgba\(255, 255, 255, 0\.75\), rgba\(255, 255, 255, 0\.75\)\), url\("data:image\/gif;base64,AAA"\)/)
-  assert.match(tinted[2], /^\[class\*="_centerCol"\], \[class~="centerCol"\] \{ background-color: transparent !important; \}$/)
-  // A plain browser keeps the single page rule: no frame rounding to fill.
+  assert.equal(tinted.length, 2)
+  assert.equal(tinted.some((rule) => /_frame/.test(rule)), false)
+  assert.match(tinted[1], /^\[class\*="_centerCol"\], \[class~="centerCol"\] \{ background-image: linear-gradient\(rgba\(255, 255, 255, 0\.75\), rgba\(255, 255, 255, 0\.75\)\), url\("data:image\/gif;base64,AAA"\) !important;/)
+  // One tint, painted once, so the slider moves the visible wallpaper instead of
+  // stacking a second veil on top of it.
+  assert.equal((tinted.join(String.fromCharCode(10)).match(/linear-gradient\(rgba\(/g) ?? []).length, 1)
+  // The frame is never forced transparent on this shell: that was the black notch.
+  const surface = engine.backgroundSurfaceRules(window.document, 0.8)
+  assert.equal(surface.some((rule) => rule.startsWith('[class*="_frame"]')), false)
+  // macOS keeps the frame copy: its frame is transparent on purpose (native vibrancy),
+  // its sidebar reads the wallpaper through it, and the column has no radius.
+  const mac = setup('data-platform="darwin"', WITH_FRAME)
+  const macRules = engine.wallpaperRules(mac.document, 'data:image/gif;base64,AAA', { rgb: '255, 255, 255', base: 0.75, panel: 0.9, target: 'frame' })
+  assert.equal(macRules.length, 3)
+  assert.match(macRules[1], /^\[class\*="_frame"\], \[class~="frame"\] \{ background-image: linear-gradient\(/)
+  assert.match(macRules[2], /^\[class\*="_centerCol"\], \[class~="centerCol"\] \{ background-color: transparent !important; \}$/)
+  // A plain browser keeps the single page rule: no window rounding to cut.
   const web = setup('', WITH_FRAME)
   assert.equal(engine.wallpaperRules(web.document, 'data:image/gif;base64,AAA').length, 1)
   assert.equal(engine.wallpaperRules(web.document, 'data:image/gif;base64,AAA', { rgb: '255, 255, 255', base: 0.75, panel: 0.9, target: 'token' }).length, 1)

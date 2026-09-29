@@ -1,10 +1,12 @@
-# dsh-myskin (v0.3.6)
+# dsh-myskin (v0.3.7)
 
-DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设置页。
+DSH **通用皮肤框架**：可视化自定义 + 实时预览 + 「皮肤管理」设置页（Web 与 Desktop 同一套客户端管线）。
 非侵入式：不改 DSH 源码 / 配置、不改 DSH 进程；皮肤是完全可逆的覆盖层。
 
 **适配：DSH 0.1.7-rc.2 与 0.2.0-rc.1（截至 2026-09-28 的 `next`，上游 `master` 同一提交）；
 Web 与 Desktop 共用同一条客户端插件管线。**
+
+逐版变更见 **[CHANGELOG.md](CHANGELOG.md)**；本 README 保留每个版本"为什么这么改"的推导。
 
 DSH ≥0.1.7 移除了命令式 `settings.register(ns, schema)`。本包随之改为官方形态：
 **profile bundle + 导出 schemastery `Config`**，命名空间 = 插件条目 id = `dsh-myskin`。
@@ -26,7 +28,7 @@ DSH ≥0.1.7 移除了命令式 `settings.register(ns, schema)`。本包随之�
   - 背景图/嵌入图在提交前会按最长边 2048 自动降采样为 WebP（设置文档写进 profile patch，原图会让每次保存都变慢）。
   - 「应用」只在 Host 接受全部字段后才关闭编辑器；失败会在工具栏就地提示。
   - 桌面端：工具条改从窗口 chrome 之下开始（Windows 标题栏 / 全屏），页面内缩改成加在 frame 的标题栏内边距上，原生按钮位置不动；插件自己的覆盖层统一声明 `-webkit-app-region: no-drag`（上游只在 darwin 用 `body > :not(#root)` 兜底，Windows 没有）。
-  - 背景图只动两层：外壳画布 `--dsw-alias-bg-base`（跟随「背景强度」，默认 75%）和卡片面板 `--dsw-alias-bg-layer-1`（比画布高 15 个百分点，保证卡片上的文字清晰）；**菜单/弹窗层 `bg-layer-2`、`bg-overlay` 永不改**。macOS 桌面窗口是透明的（原生 vibrancy），没有任何元素画 `bg-base`，此时改在 frame 自身上铺同色半透明层，强度滑块才在桌面端有效。强度滑块在右侧面板（35%–100%，100% = 完全不透视）；**拖动即实时预览，松手后自动保存**（400ms 去抖，无需点「应用」）。强度同时镜像进一条 `:root { --dsh-myskin-bg-opacity: … }` 标记规则（写在 `css` 里），因此即使 Host 半区还没重载到带 `backgroundOpacity` 字段的 schema，数值也能存取往返。
+  - 背景强度只作用一次：**对话列拥有唯一的画布表面**（Windows 下壁纸 + 染色画在 `[class*="_centerCol"]` 上，被列自身的圆角裁剪；macOS 仍画在 frame 上），列内 chrome 的 `--dsw-alias-bg-base` 被置为 `transparent`，只有 `[data-slot="conversation.session"]` / `[data-slot^="conversation.view"]` 里的卡片保留它；卡片面板 `--dsw-alias-bg-layer-1` 比画布高 15 个百分点，保证卡片上的文字清晰；**菜单/弹窗层 `bg-layer-2`、`bg-overlay` 永不改**。macOS 桌面窗口是透明的（原生 vibrancy），没有任何元素画 `bg-base`，此时改在 frame 自身上铺同色半透明层，强度滑块才在桌面端有效。强度滑块在右侧面板（35%–100%，100% = 完全不透视）；**拖动即实时预览，松手后自动保存**（400ms 去抖，无需点「应用」）。强度同时镜像进一条 `:root { --dsh-myskin-bg-opacity: … }` 标记规则（写在 `css` 里），因此即使 Host 半区还没重载到带 `backgroundOpacity` 字段的 schema，数值也能存取往返。
 
 ## 画布编辑器：元素操作与保存（0.3.2）
 
@@ -125,6 +127,20 @@ darwin 覆盖层 `no-drag` 约定、`data-platform`、Windows 标题栏标记与
 `aria-selected/expanded`、`#root`）与**客户端模块协议**（`window.__ModuleLoader__`）。
 `npm run check:types` 再用两代真实的 `.d.ts` 编译 `src/`，0 诊断；`tests/types/inject-services.ts`
 逐个验证 `inject` 里的服务名仍然存在（服务名是字符串，只有类型能替它把关）。
+
+### 0.3.7 DSH 通用皮肤框架（本次优化）
+
+定位由「DSH Web 皮肤插件」改为「**DSH 通用皮肤框架**」（Web 与 Desktop 同一套客户端管线），并修掉三件实测问题。
+逐版日志与完整推导见 **[CHANGELOG.md](CHANGELOG.md)**；这里只留当前设计的事实。
+
+| 问题 | 现状 |
+|---|---|
+| 桌面壁纸越过对话列圆角；同一「背景强度」在顶栏 / 对话区 / 发送栏表现不同（实测反解 0.94 / 0.75 / ≈1.00） | Windows 下壁纸 + 染色画在**对话列**上（列自己的 `border-radius` + `overflow:hidden` 把图切在 16px 圆角内），frame 不再画图、保留 DSH 自己的 `--dsw-specific-sidebar-fill` 填缺口；列内 chrome 一律 `--dsw-alias-bg-base: transparent`，只有内容槽（`[data-slot="conversation.session"]` / `[data-slot^="conversation.view"]`）与 composer 座位里的卡片拿回 token，composerSeat 自身 `background: none`。**每像素只有一个画布层**，强度值 = 实际 alpha（三处一致） |
+| 绘制模式下打开设置，弹窗被工具条 / 面板盖住 | 设置浮层按**和主界面同一条内缩规则**布局：`body > :not(#root):not([data-dsh-myskin-ui]):has([data-shortcut-modal])` 内缩 `--dsh-myskin-inset-top/right`（Windows 再叠 `--dsh-myskin-chrome-top`），面板的 `height`/`max-width` 同步收口；工具条与面板保持可见可点（上游 `useModalLayer` 只圈 Tab 与 Escape、不锁鼠标） |
+| 侧栏收起 / 展开后嵌入图消失 | 补打标容忍多匹配（优先取可见者）、节点被重建时按**祖先链指纹**（`TAG.class` 逐级到 `body`，不含兄弟序号）重找且**只认唯一命中**，观察器同时盯 `class`/`hidden`；结构回退选择器**不**直接进样式表（位置型路径会命中"长得像"的节点） |
+
+已知取舍：Windows 下壁纸只画在对话列，右栏等透明列改为露出 frame 自身表面色（可用 `--dsw-specific-sidebar-fill` 控制）；
+「轨迹」页仍按上游语义用 panel 层 `bg-layer-1`（比画布高 15 个百分点）。想要原来顶栏那种更白的观感，把强度滑块调高（0.9 左右）。
 
 ### 0.3.6 桌面壁纸：染色只施加一次（修"不受透明度管理"）
 

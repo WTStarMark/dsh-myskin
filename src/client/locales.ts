@@ -2,7 +2,7 @@
 export const zh = {
   nav: '皮肤管理',
   title: '皮肤管理',
-  intro: '在这里管理、预览并可视化自定义 DSH Web 皮肤。皮肤是完全可逆的覆盖层，不影响 DSH 正常运行。',
+  intro: '在这里管理、预览并可视化自定义 DSH 通用皮肤框架（dsh-myskin）。皮肤是完全可逆的覆盖层，不影响 DSH 正常运行。',
   enabled: '启用皮肤',
   skinLabel: '当前皮肤',
   preset: '预设主题',
@@ -106,7 +106,7 @@ export const zh = {
 export const en = {
   nav: 'Skin',
   title: 'Skin Management',
-  intro: 'Manage, preview, and visually customize your DSH Web skin. A skin is a fully reversible overlay that never disturbs DSH itself.',
+  intro: 'Manage, preview, and visually customize your DSH skin framework (dsh-myskin). A skin is a fully reversible overlay that never disturbs DSH itself.',
   enabled: 'Enable skin',
   skinLabel: 'Current skin',
   preset: 'Preset themes',

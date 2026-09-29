@@ -1,17 +1,17 @@
 ---
 name: dsh-myskin
-description: DSH Web/Desktop 皮肤插件（dsh-myskin）的功能与设置说明：管理 `dsh-myskin` 命名空间（tokens / css / text / canvas / layers / content / library）、装载方式、皮肤库与导入导出，均可逆为非侵入覆盖层。Use when the user asks to change the DSH web look, apply or manage a dsh-myskin skin, install the plugin into a profile, or read/write the `dsh-myskin` settings entry.
+description: DSH 通用皮肤框架 dsh-myskin（Web 与 Desktop 同一套客户端管线）的功能与设置说明：管理 `dsh-myskin` 命名空间（tokens / css / text / canvas / layers / content / library）、装载方式、皮肤库与导入导出，均可逆为非侵入覆盖层。Use when the user asks to change the DSH web look, apply or manage a dsh-myskin skin, install the plugin into a profile, or read/write the `dsh-myskin` settings entry.
 ---
 
 # dsh-myskin 配置技能（功能 + 详细指向）
 
 > 本技能**只陈述 dsh-myskin 的功能与详细指向**，不做美化/配色指导。
-> 适配版本：**DSH 0.1.7-rc.2 与 0.2.0-rc.1**（包版本 0.3.6；Web 与 Desktop 同一套客户端插件管线；
+> 适配版本：**DSH 0.1.7-rc.2 与 0.2.0-rc.1**（包版本 0.3.7；Web 与 Desktop 同一套客户端插件管线；
 > 桌面壳按上游 `data-platform` / `data-windows-titlebar` 契约适配，见 `src/client/desktop.ts`）。
 
 ## 1. 项目是什么
 
-DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设置页。非侵入式：不改 DSH 源码/配置、不改 DSH 进程；皮肤是完全可逆的覆盖层。
+DSH **通用皮肤框架**（项目名 `dsh-myskin`）：可视化自定义 + 实时预览 + 「皮肤管理」设置页，Web 与 Desktop 共用同一套客户端插件管线。非侵入式：不改 DSH 源码/配置、不改 DSH 进程；皮肤是完全可逆的覆盖层。
 
 - 项目目录：`/root/dsh-myskin`（源码里的 `D:Mochen...` 路径是 0.1.6 时期的 Windows 历史路径，已废弃）。
 - 装载：作为 **profile bundle** 装进目标 profile —— Web 是 `$DSH_HOME/profiles/web`，Desktop 是 `$DSH_HOME/profiles/desktop`；包内 `cordis.patch.yml` 自带条目 `id: dsh-myskin`，由该 profile 的 `dsh.profile.bundles` 选中。旧的「profiles/node_modules 软链 + 手写 insert 行」是 legacy 路线。
@@ -48,12 +48,12 @@ DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设
 1. 设置 →「皮肤管理」→ **绘制模式**：先关闭设置弹窗，再把真实页面**内缩**——顶部工具条与右侧 340px 面板各占自己的位置，不覆盖 DSH 界面（不再用 iframe 复制一份应用）。退出编辑器自动还原页面布局。
    - **桌面端**：工具条让开 Windows 原生标题栏 / macOS 红绿灯（全屏时红绿灯隐藏、留白收窄），页面内缩改加在 frame 的标题栏内边距上；开/关编辑器后补发上游 `data-window-drag-recall` 脉冲，避免 macOS 窗口拖拽矩形停留在旧几何。2. **元素操作**（右侧面板，「元素操作」一节）：**编辑文字**（自动定位承载文字的节点，画布内即时生效；`text` 字段）、**隐藏控件**（`visibility: hidden !important`，保留占位）、**移除控件**（`display: none !important`，不占位）、**清除该元素自定义**。隐藏/移除按**属性合并**进已有规则，不解构其它自定义；都是纯 CSS，**不删真实 DOM**（避免 React 卸载崩溃）。三者都可一键撤销（取消隐藏 / 恢复显示 / 还原文字）。
 3. **保存**：工具条显示保存状态（有未保存的更改 / 保存中 / 已保存 / 保存失败：<字段名>）；点 ✕ 关闭会先自动保存，失败则保留编辑器并列出被 Host 拒绝的字段。`ConfigForm.set` 对非 volatile 路径或 schema 不匹配会返回 false，以前被压成一个布尔值，现在按字段报出来。
-4. **背景图体积**：壁纸按最长边 1600 / WebP 0.85 压缩，data URL 超 1.5 MB 逐级降到 1280/960，仍超标就拒收并提示（设置文档每次编辑都整份重发，大图是「保存失败」的常见原因）。桌面端会清掉 `frame` 自身那层不透明底色，否则壁纸被整块盖住、看起来像「加载不了背景图」。
+4. **背景图体积**：壁纸按最长边 1600 / WebP 0.85 压缩，data URL 超 1.5 MB 逐级降到 1280/960，仍超标就拒收并提示（设置文档每次编辑都整份重发，大图是「保存失败」的常见原因）。桌面端的壁纸落点见下方「桌面端壁纸＝对话列拥有唯一画布表面」一条：Windows 画在对话列上（由列自身圆角裁剪），macOS 画在 frame 上。
 2. **编辑**模式：点击页面任意元素即选中（不会触发原按钮）；**交互**模式：覆盖层不拦截事件，可正常滚动/使用应用。
 3. 背景图 = 直接选文件；嵌入图片 = 先选中一个容器，再选文件；拖拽/缩放手柄调整。
 4. **应用** → 写入 `dsh-myskin` 条目；Host 接受全部字段才关闭编辑器，失败会就地提示（图片过大/连接中断）。
 5. 上传图片会自动降采样（最长边 2048 / WebP 0.9），避免设置文档过大。
-6. **背景强度**（右侧面板滑块，默认 0.75，范围 0.35–1）：拖动即时预览、松手自动保存（400ms 去抖）。外壳画布 `--dsw-alias-bg-base` 用该值，面板 `--dsw-alias-bg-layer-1` 用「该值 + 0.15」（保证卡片文字清晰）；`bg-layer-2` / `bg-overlay`（弹窗、菜单）永不改。100% = 不透视。数值越低壁纸越明显。持久化时同时写 `canvas.backgroundOpacity` 与 `css` 里的 `:root { --dsh-myskin-bg-opacity: … }` 标记（旧 schema 下也能往返）。
+6. **背景强度**（右侧面板滑块，默认 0.75，范围 0.35–1）：拖动即时预览、松手自动保存（400ms 去抖）。外壳画布 `--dsw-alias-bg-base` 用该值，面板 `--dsw-alias-bg-layer-1` 用「该值 + 0.15」（保证卡片文字清晰）；`bg-layer-2` / `bg-overlay`（弹窗、菜单）永不改。100% = 不透视。数值越低壁纸越明显。0.3.7 起该值**每个像素只施加一次**（对话列拥有唯一画布表面），所以顶栏 / 对话区 / 发送栏三处观感一致；嫌太透就调高，0.9 左右≈从前顶栏那种「一层白色透」。持久化时同时写 `canvas.backgroundOpacity` 与 `css` 里的 `:root { --dsh-myskin-bg-opacity: … }` 标记（旧 schema 下也能往返）。
 
 ## 4. 运行时应用生命周期
 
@@ -114,9 +114,12 @@ DSH Web 皮肤插件：可视化自定义 + 实时预览 + 「皮肤管理」设
 - `layers` 的 `selector` 应指向安全容器（`body` 或非 React 映射列表的普通包装 `:scope > div`），别插进 React 管理的映射列表中间；`content.workspaceTree` 走内置装饰器（不注入节点，React 安全）。
 - **皮肤不生效/回退默认**：看 console 是否报错；看有无 `<style id="dsh-myskin-rule">`；确认该 profile 的插件条目真的被服务（`settings describe` 里应出现 `dsh-myskin`）。
 - **导入/加载会整体替换文档**：先「导出皮肤」备份，否则当前壁纸与皮肤库会被覆盖。
-- **背景强度滑块**：拖动即时预览、松手 400ms 自动保存，不需要点「应用」。macOS 桌面窗口透明（原生 vibrancy），没有元素画 `bg-base`，此时强度值改为铺在 frame 自身上；Windows 标题栏取色跟随 `--dsw-specific-sidebar-fill`，改这个令牌原生标题栏会跟着变。
+- **背景强度滑块**：拖动即时预览、松手 400ms 自动保存，不需要点「应用」。macOS 桌面窗口透明（原生 vibrancy），没有元素画 `bg-base`，此时强度值改为铺在 frame 自身上；Windows 标题栏取色跟随 `--dsw-specific-sidebar-fill`，改这个令牌原生标题栏会跟着变。滑块值 = 每个像素上的画布覆盖度，三处（顶栏/对话区/发送栏）一致；若反馈「某处更白/更透」，先确认是不是列内又出现了画 `bg-base` 的元素（0.3.7 用 `--dsw-alias-bg-base: transparent` 把列内 chrome 一律禁掉，只有内容槽与 composer 座位里的卡片保留它）。
 - **启动报 `dsh-myskin (dsh-myskin): failed to import`**：app-boot 把 Loader「没拿到 fiber」记成字面量，真实异常被吞。0.3.1 起 `lib/index.js` 自带 schemastery（不再 external），解压/`link:`/拷贝这类没有 node_modules 的装法也能导入；旧包在该装法下必然失败。定位命令：`node --input-type=module -e "await import('<pkg>/lib/index.js')"`（能打印 `Config,apply,name` 即宿主半区没问题）。
 - **选择器必须在 portal 里也能匹配**：设置面板/菜单/弹窗是 `createPortal(…, document.body)`（在 `#root` 之外）。选择器统一由 `skin-engine.ts` 的 `selectorOf()` 生成（`#root` 内用 `#root > …`；portal 内优先 `[data-shortcut-modal]…`/`[role="dialog"…]`，最后 `body > …`）。自己拼选择器时若以 `#root` 打头去指设置页里的元素，规则会静默失效。
 - **隐藏 vs 移除**：隐藏 = `visibility: hidden !important`（保留占位）；移除 = `display: none !important`（不占位）；两者按属性合并进该元素已有规则，可一键撤销。
-- **桌面端壁纸＝染色只施加一次**：`body` 放原图；`[class*="_frame"]` 放 `linear-gradient(<染色>), url(<壁纸>)`（圆角与画布共用同一层）；`[class*="_centerCol"]` 置 `background-color: transparent` 不再二次染色。若把染色同时留在 frame 与对话列上，强度滑块会几乎无效（0.3.5 的实际故障）。`check:compat` 用 `centerCol`/`_frame` 两个 DOM 契约守住这两个类名。
+- **桌面端壁纸＝对话列拥有唯一画布表面（0.3.7）**：`body` 放原图；Windows 下壁纸 + 染色画在 `[class*="_centerCol"]` 上（列自己的 `border-radius` + `overflow:hidden` 负责把壁纸切在 16px 圆角内），`frame` 不画图、保留 DSH 自己的 `--dsw-specific-sidebar-fill` 去填缺口；macOS 下仍画在 `frame` 上（透明 frame + 原生 vibrancy）。列内 chrome 一律 `--dsw-alias-bg-base: transparent`，只有**内容槽**（`[data-slot="conversation.session"]` / `[data-slot^="conversation.view"]`）与 composer 座位（`[data-composer-seat]` / `[class*="_composerSeat"]`）里的卡片把 token 拿回去——顶栏走的是 `conversation.session.header` 槽，别把它算进内容槽，否则顶栏会重新叠一层；composerSeat 自己 `background: none`（否则发送栏比别处多一层）。
+  历史两个反例都别回退：frame 透明 → 圆角缺口露原生窗口底色（黑块，0.3.2）；frame 也画壁纸 → 壁纸糊过圆角、圆角等于没有，且列内再叠一层让滑块几乎无效（0.3.5/0.3.6）。`check:compat` 用 `centerCol` / `_composerSeat` / `data-slot` / `--dsh-windows-content-radius` 四个 DOM 契约守住这些类名与令牌。
+- **绘制模式 vs 上游模态（0.3.7）**：画布层是 `document.body` 上的独立 React 根（`data-dsh-myskin-canvas`，z-index 9999），上游设置/快捷键弹窗是 `body` 上的整层全视口浮层（`position:fixed;inset:0`，z-index 1000），绘制期间开设置会被工具条/面板盖住。**修法是内缩而不是隐藏**（曾试过隐藏画布层，被否掉：还在绘制的人正需要工具条与面板）：在 `editorFrameRules()` 里给 `body > :not(#root):not([data-dsh-myskin-ui]):has([data-shortcut-modal])` 加 `top: chrome+inset-top` / `right: inset-right`，并给 `[data-shortcut-modal="settings"]` 收口 `height`/`max-width`（面板原本按 `100vh/100vw` 定尺寸，内缩后会溢出）。上游 `useModalLayer` 只圈 Tab 与 Escape、不锁鼠标，所以工具条仍可点。别改成降 z-index：菜单/浮层比弹窗层级更高，降下来工具条反被菜单盖。
+- **嵌入图身份判定（0.3.7）**：瞬态属性 `[data-dsh-myskin-embed]` 会被 React 重建时抹掉。补打标的三条规则：多匹配取可见者（不再"不唯一就放弃"）、节点重建后按**祖先链指纹**重找（只认唯一命中）、观察器同时盯 `class`/`hidden`（侧栏收起只换 class，不卸载节点）。**不要**把结构回退选择器直接写进样式表：位置型路径一旦错位就会把图打到"长得像"的节点上。
 - **不要把 `dsh.client.platform` 改成 `"desktop"`**：Host 只服务 `platform === "web"` 的客户端半区；桌面端装进 `$DSH_HOME/profiles/desktop` 即可（默认端口 19387）。

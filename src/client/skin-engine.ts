@@ -12,7 +12,7 @@
  */
 
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
-import type { CssRule, InjectedLayer, SkinSettings, TextOverride, TokenModes } from '../skin-schema.ts'
+import type { CssRule, EmbeddedImage, InjectedLayer, SkinSettings, TextOverride, TokenModes } from '../skin-schema.ts'
 import { readDesktopShell } from './desktop.ts'
 
 export const PLUGIN_ID = 'dsh-myskin'
@@ -184,12 +184,51 @@ export function withBackgroundOpacity(css: readonly CssRule[], opacity: number):
  * Selector for the app frame.
  *
  * Client plugin bundles carry CSS-module names as `_frame_<hash>` in some builds and
- * as the plain `frame` in others, so match both: the frame is where the wallpaper and
- * its single tint live, and a miss would put the black notch back.
+ * as the plain `frame` in others, so match both.
  */
 const FRAME_SELECTOR = '[class*="_frame"], [class~="frame"]'
-/** Selector for the conversation column (same naming caveat as {@link FRAME_SELECTOR}). */
-const CENTER_COLUMN_SELECTOR = '[class*="_centerCol"], [class~="centerCol"]'
+/**
+ * Selectors for the conversation column (same naming caveat as {@link FRAME_SELECTOR}).
+ *
+ * Kept as a list, not a joined string: rules that scope something *inside* the column
+ * must expand every combination, and prefixing a joined `a, b` list would silently
+ * apply the descendant part to the last selector only.
+ */
+const COLUMN_SELECTORS = ['[class*="_centerCol"]', '[class~="centerCol"]'] as const
+/** The column as one selector list. */
+const CENTER_COLUMN_SELECTOR = COLUMN_SELECTORS.join(', ')
+/**
+ * Selectors for the composer seat: the sticky bottom bar that carries the send card.
+ *
+ * `data-composer-seat` / `data-conversation-region="composer"` are the stable markers
+ * (ui-conversation stamps them); the CSS-module name is the fallback for builds that
+ * emit plain class names.
+ */
+const SEAT_SELECTORS = ['[data-composer-seat]', '[class*="_composerSeat"]', '[class~="composerSeat"]'] as const
+/**
+ * Selectors for the slots that carry conversation CONTENT (not chrome).
+ *
+ * The renderer stamps every slot host with `data-slot="<key>"` (ui-renderer sets
+ * `"data-slot": slotKey`), and these keys belong to the slot API. Only the content
+ * slots may take the canvas token back: the header is rendered through
+ * `conversation.session.header` and the composer through `conversation.composer`,
+ * i.e. both live in slots too — a `^="conversation."` match would hand the chrome its
+ * canvas surface back and the whole single-layer fix would silently undo itself on the
+ * top bar.
+ */
+const CONTENT_SLOT_SELECTORS = ['[data-slot="conversation.session"]', '[data-slot^="conversation.view"]'] as const
+
+/**
+ * Expand `outer` × `inner` into one descendant selector list.
+ * @param outer - ancestor selectors.
+ * @param inner - descendant selectors.
+ * @returns the comma-joined combinations (e.g. `a c, a d, b c, b d`).
+ */
+function scoped(outer: readonly string[], inner: readonly string[]): string {
+  const out: string[] = []
+  for (const ancestor of outer) for (const descendant of inner) out.push(ancestor + ' ' + descendant)
+  return out.join(', ')
+}
 
 /** Declaration the editor writes for "hide this control" (keeps its layout slot). */
 export const HIDE_DECLARATION = 'visibility: hidden !important'
@@ -386,14 +425,23 @@ export function surfaceTint(doc: Document, opacity: number = DEFAULT_BACKGROUND_
 }
 
 /**
- * Rules for one wallpaper: the page background, plus the desktop frame.
+ * Rules for one wallpaper: the page canvas, plus the surface that owns the rounded
+ * content corner.
  *
- * The desktop frame owns the window's rounded corner (Windows rounds the
- * conversation column's top-left with `--dsh-windows-content-radius`). Leaving the
- * frame transparent so the page image could show through therefore exposed the
- * native window colour (Electron's opaque chrome fallback, `#1b1b1c` in dark mode)
- * as a black notch in that corner. Painting the same image on the frame fills the
- * corner with the wallpaper and still lets the tinted canvas show through.
+ * Windows rounds the conversation column's top-left (`--dsh-windows-content-radius`)
+ * and clips that column's own background with the radius, so on Windows the wallpaper
+ * goes ON the column: the corner then *cuts* the image instead of letting it run
+ * across the notch — the wallpaper keeps its rounded boundary and the frame keeps the
+ * surface DSH already paints there (`--dsw-specific-sidebar-fill`, which is exactly
+ * what fills the 16px notch and blends into the caption row and the sidebar).
+ *
+ * The frame is deliberately left image-free on Windows. Both earlier variants were
+ * wrong: a transparent frame exposed Electron's window colour (opaque chrome fallback,
+ * `#1b1b1c` in dark mode) as a black notch, and a wallpapered frame erased the
+ * rounding altogether by filling the notch with the same image.
+ *
+ * macOS keeps the frame copy: its frame is transparent on purpose (native vibrancy),
+ * its sidebar reads the wallpaper through it, and the content column has no radius.
  * @param doc - the document being styled.
  * @param url - the wallpaper data URL.
  * @returns the CSS rules to write.
@@ -402,17 +450,23 @@ export function wallpaperRules(doc: Document, url: string, tint?: SurfaceTint): 
   const geometry = 'background-size: cover !important; background-position: center !important; background-attachment: fixed !important;'
   const body = 'background-image: url("' + url + '") !important; ' + geometry
   const rules = ['body { ' + body + ' }']
-  if (!readDesktopShell(doc).desktop) return rules
-  // One tint, applied ONCE, on the frame: the frame owns the window's rounded corner
-  // (Windows rounds the conversation column's top-left), so it has to carry the image
-  // itself — a transparent frame exposed the native window colour as a black notch.
-  // The tint rides on the frame as a gradient layer ABOVE the image and the
-  // conversation column stops painting its own copy: applying it on both would
-  // double the dimming and the strength slider would barely move anything.
   const fmt = (value: number): string => String(Math.round(value * 100) / 100)
   const layers = tint === undefined
     ? 'url("' + url + '")'
     : 'linear-gradient(rgba(' + tint.rgb + ', ' + fmt(tint.base) + '), rgba(' + tint.rgb + ', ' + fmt(tint.base) + ')), url("' + url + '")'
+  const shell = readDesktopShell(doc)
+  if (shell.windowsTitlebar) {
+    // The column paints the image AND gives up its own colour in one rule, so neither
+    // the token layer (below) nor a stale `background` shorthand can stack a second
+    // surface under the wallpaper. `overflow: hidden` + `border-radius` already clip
+    // it to the rounded corner.
+    rules.push(CENTER_COLUMN_SELECTOR + ' { background-image: ' + layers + ' !important; ' + geometry + ' background-color: transparent !important; }')
+    return rules
+  }
+  if (!shell.desktop) return rules
+  // macOS: the frame is the surface the vibrancy sidebar reads, so the wallpaper and
+  // its single tint stay there, and the column keeps showing it instead of painting
+  // its own copy (two copies double the dimming and the slider barely moves anything).
   rules.push(FRAME_SELECTOR + ' { background-image: ' + layers + ' !important; ' + geometry + ' }')
   if (tint !== undefined) rules.push(CENTER_COLUMN_SELECTOR + ' { background-color: transparent !important; }')
   return rules
@@ -464,15 +518,26 @@ export function desktopFrameTint(doc: Document): string | undefined {
 }
 
 /**
- * Rules that let a body background image show through the shell surface WITHOUT
- * washing the UI out.
+ * Rules that let the wallpaper show through the shell surface WITHOUT washing the UI
+ * out — applied exactly ONCE per pixel.
  *
- * Only `--dsw-alias-bg-base` is overridden: that is the shell canvas the
- * conversation sits on. Card, menu and dialog surfaces (`bg-layer-1`,
- * `bg-layer-2`, `bg-overlay`) keep their own opaque colours — making those
- * translucent is what made text unreadable. `opacity` is how strongly the shell
- * surface covers the image (1 = leave the app untouched; the image simply does
- * not show through).
+ * `--dsw-alias-bg-base` is the shell canvas: giving it an alpha is what makes the
+ * wallpaper visible, and `opacity` is how strongly that surface covers the image
+ * (1 = leave the app untouched; the image simply does not show through). DSH paints
+ * the same token in several *nested* surfaces (frame → column → conversation root →
+ * composer seat), so one slider value used to produce a different transparency in
+ * every region. Measured on a real Windows session by solving
+ * `observed = α·surface + (1-α)·wallpaper` per pixel against the wallpaper itself
+ * (α = how much surface covers the wallpaper): transcript ≈ 0.75, conversation top
+ * bar ≈ 0.94, send bar ≈ 1.0 — three values, one slider.
+ *
+ * Ownership, not more layers, is the fix: the column owns the only canvas surface
+ * (see {@link wallpaperRules}), the chrome inside the column is denied the token, and
+ * the token comes back only where a card is *meant* to sit above the canvas — the
+ * content a conversation slot renders (tool cards, file chips) and the composer's own
+ * cards. Card, menu and dialog surfaces elsewhere (`bg-layer-1`, `bg-layer-2`,
+ * `bg-overlay`) keep their own colours; making those translucent is what made text
+ * unreadable.
  *
  * @param doc - document to measure (the live page).
  * @param opacity - shell surface opacity, 0..1.
@@ -493,7 +558,34 @@ export function backgroundSurfaceRules(doc: Document, opacity: number = DEFAULT_
   // Panels keep more body than the canvas: text on cards stays crisp while the
   // wallpaper still reads as texture. Dialogs/menus (layer-2/overlay) never move.
   if (tint.panel < 0.999) rules.push('body { --dsw-alias-bg-layer-1: rgba(' + tint.rgb + ', ' + fmt(tint.panel) + ') !important; }')
+  // ONE canvas surface per pixel inside the conversation column. Two tiers nested over
+  // each other (the column's own colour over the root's, the seat's gradient over
+  // both) are what made the three regions disagree; the column already carries the
+  // wallpaper and its tint, so everything inside it must stop painting that surface.
+  const canvas = 'rgba(' + tint.rgb + ', ' + fmt(tint.base) + ')'
+  rules.push(CENTER_COLUMN_SELECTOR + ' { --dsw-alias-bg-base: transparent !important; }')
+  // …give it back to the content the view renders, where cards must sit above the
+  // canvas so their text stays crisp (tool cards, file chips, sticky rows). Content
+  // slots only: the header and the composer are slots as well.
+  rules.push(scoped(COLUMN_SELECTORS, CONTENT_SLOT_SELECTORS) + ' { --dsw-alias-bg-base: ' + canvas + ' !important; }')
+  // …and to the composer seat's own cards, while the seat itself stops painting the
+  // bottom fade that stacked a third veil under the send bar.
+  rules.push(scoped(COLUMN_SELECTORS, SEAT_SELECTORS) + ' { background: none !important; --dsw-alias-bg-base: ' + canvas + ' !important; }')
   return rules
+}
+
+/**
+ * `::after` layer that paints one embedded image inside its container.
+ *
+ * Above the container's own background, below its content, sized from the editor's
+ * position/size and following the container's collapse.
+ * @param img - the embedded image.
+ * @returns the `::after` declaration block (selector omitted, so it can be appended to
+ *   both the transient attribute selector and the structural fallback).
+ */
+function embedAfter(img: EmbeddedImage): string {
+  const blend = img.blend !== undefined && img.blend !== 'normal' ? ' mix-blend-mode: ' + img.blend + ';' : ''
+  return '::after { content: \'\'; position: absolute; inset: 0; background-image: url("' + img.url + '"); background-repeat: no-repeat; background-position: ' + img.x + 'px ' + img.y + 'px; background-size: ' + img.w + 'px ' + img.h + 'px; opacity: ' + (img.opacity ?? 1) + '; pointer-events: none; z-index: 1;' + blend + ' }'
 }
 
 /**
@@ -541,11 +633,14 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
     img.selector !== '' && img.url !== '' && img.fallbackSelector !== undefined && img.fallbackSelector !== '',
   )
   for (const img of skin.canvas.images) {
-    if (img.selector !== '' && img.url !== '') {
-      rules.push(img.selector + ' { position: relative; }')
-      const blendCss = img.blend !== undefined && img.blend !== 'normal' ? ' mix-blend-mode: ' + img.blend + ';' : ''
-      rules.push(img.selector + '::after { content: \'\'; position: absolute; inset: 0; background-image: url("' + img.url + '"); background-repeat: no-repeat; background-position: ' + img.x + 'px ' + img.y + 'px; background-size: ' + img.w + 'px ' + img.h + 'px; opacity: ' + (img.opacity ?? 1) + '; pointer-events: none; z-index: 1;' + blendCss + ' }')
-    }
+    if (img.selector === '' || img.url === '') continue
+    rules.push(img.selector + ' { position: relative; }')
+    rules.push(img.selector + embedAfter(img))
+    // The structural fallback is deliberately NOT painted directly, even when it matches
+    // exactly one element right now: it is a positional path, so the moment React shifts a
+    // sibling the same selector matches a look-alike and the image would be painted on the
+    // wrong node. Identity is the engine's job (see the re-tag loop below), not the
+    // stylesheet's.
   }
   // Cross-document recovery: the image's own selector is the editor iframe's
   // `[data-dsh-myskin-embed=...]` attribute, which the real page never carries.
@@ -555,6 +650,71 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
   // single shared MutationObserver keeps the unique fallback re-tagged across
   // re-renders and late mounts until the skin is disposed.
   if (embedTargets.length > 0 && typeof document !== 'undefined' && typeof MutationObserver !== 'undefined') {
+    /** The element each image was last tagged on, used to recognise it after a rebuild. */
+    const taggedElements = new Map<string, Element>()
+    /** Its ancestor fingerprint, for when the element itself was re-created. */
+    const taggedChains = new Map<string, string[]>()
+    /**
+     * Resolve a selector to the element it should target.
+     *
+     * "Exactly one match" was the old rule, and it is why an embedded image vanished
+     * after the sidebar collapsed and expanded again: for a frame React keeps both the
+     * rail and the panel mounted (two matches), and a remount can also leave the old
+     * attribute behind on a detached node. Several matches therefore prefer a *visible*
+     * one (browsers; jsdom has no layout and falls back to the first), and the first
+     * match is always better than giving up.
+     * @param selector - candidate selector.
+     * @returns the element to tag, or undefined when nothing matches.
+     */
+    const pick = (selector: string): Element | undefined => {
+      let els: Element[]
+      try { els = Array.from(document.querySelectorAll(selector)) } catch { return undefined }
+      if (els.length === 0) return undefined
+      if (els.length === 1) return els[0]
+      return els.find((el) => el.getClientRects().length > 0) ?? els[0]
+    }
+    /**
+     * Fingerprint of an element: `TAG.class` for the element and up to 8 ancestors.
+     *
+     * Sibling index is deliberately left out — the index is exactly what React shuffles
+     * when it rebuilds a node — while tag + CSS-module classes survive that rebuild.
+     * @param el - the element to fingerprint.
+     * @returns the chain, root-most first.
+     */
+    const chainOf = (el: Element): string[] => {
+      const chain: string[] = []
+      let node: Element | null = el
+      while (node !== null && node !== document.body && chain.length < 8) {
+        chain.unshift(node.tagName + '.' + (node.getAttribute('class') ?? ''))
+        node = node.parentElement
+      }
+      return chain
+    }
+    /**
+     * The one element in the document carrying exactly this ancestor chain.
+     *
+     * Two matches means the fingerprint is not specific enough (a list of identical rows),
+     * and then this must return undefined: re-tagging the wrong row would paint the image
+     * on someone else's node, which is worse than the image staying hidden until the user
+     * re-embeds it.
+     * @param chain - the recorded chain.
+     * @returns the element, or undefined when it is absent or ambiguous.
+     */
+    const findByChain = (chain: readonly string[]): Element | undefined => {
+      if (chain.length === 0) return undefined
+      const leaf = chain[chain.length - 1]
+      const dot = leaf.indexOf('.')
+      const tag = leaf.slice(0, dot).toLowerCase()
+      const classes = leaf.slice(dot + 1).trim().split(/\s+/).filter((name) => name !== '')
+      const selector = classes.reduce((acc, name) => acc + '.' + name, tag)
+      let candidates: Element[]
+      try { candidates = Array.from(document.querySelectorAll(selector)) } catch { return undefined }
+      const matches = candidates.filter((el) => {
+        const own = chainOf(el)
+        return own.length === chain.length && own.every((part, index) => part === chain[index])
+      })
+      return matches.length === 1 ? matches[0] : undefined
+    }
     const retag = (): void => {
       if (disposed) return
       const curKey = currentSettingsPageKey(document)
@@ -564,18 +724,29 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
         // current page matches; on any mismatch strip the stale tag so its
         // [data-dsh-myskin-embed=id] rule matches nothing.
         const scoped = img.pageKey !== undefined && img.pageKey !== ''
-        try {
-          const els = document.querySelectorAll(img.fallbackSelector!)
-          const target = els.length === 1 ? els[0] : undefined
-          if (scoped && img.pageKey !== curKey) {
-            const tagged = document.querySelector('[data-dsh-myskin-embed="' + img.id + '"]')
-            if (tagged !== null) tagged.removeAttribute('data-dsh-myskin-embed')
-            continue
-          }
-          if (target !== undefined && target.getAttribute('data-dsh-myskin-embed') !== img.id) {
-            target.setAttribute('data-dsh-myskin-embed', img.id)
-          }
-        } catch { /* invalid selector: ignore */ }
+        if (scoped && img.pageKey !== curKey) {
+          const stale = document.querySelector('[data-dsh-myskin-embed="' + img.id + '"]')
+          if (stale !== null) stale.removeAttribute('data-dsh-myskin-embed')
+          taggedElements.delete(img.id)
+          taggedChains.delete(img.id)
+          continue
+        }
+        const known = taggedElements.get(img.id)
+        let target = pick(img.fallbackSelector!)
+        // Our element survived (possibly only hidden while the sidebar was collapsed).
+        if (target === undefined && known !== undefined && known.isConnected) target = known
+        // It was re-created: a sidebar collapse/expand remounts the virtualized workspace
+        // panel, which shifts sibling indices until the stored positional path matches
+        // nothing. Re-find it by fingerprint instead — and only when that fingerprint is
+        // unique, so the image can never land on a look-alike.
+        if (target === undefined) {
+          const chain = taggedChains.get(img.id)
+          if (chain !== undefined) target = findByChain(chain)
+        }
+        if (target === undefined) continue
+        if (target.getAttribute('data-dsh-myskin-embed') !== img.id) target.setAttribute('data-dsh-myskin-embed', img.id)
+        taggedElements.set(img.id, target)
+        taggedChains.set(img.id, chainOf(target))
       }
     }
     retag()
@@ -587,10 +758,12 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
     }
     const mo = new MutationObserver(schedule)
     // childList+subtree: React rebuilding a node shows up as child mutations.
-    // We also watch aria-current so the scoping re-evaluates when the user switches
-    // settings pages. Our own setAttribute (data-dsh-myskin-embed) is not observed,
-    // so the observer cannot self-loop.
-    mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-current'] })
+    // aria-current re-evaluates the page scoping when the user switches settings pages;
+    // class/hidden cover a sidebar collapse-expand, which only swaps layout classes (the
+    // panel is hidden, not unmounted) and would otherwise never trigger a re-tag. Our own
+    // setAttribute (data-dsh-myskin-embed) is not observed, so the observer cannot
+    // self-loop.
+    mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-current', 'class', 'hidden'] })
     cleanups.push(() => { mo.disconnect() })
   }
 
