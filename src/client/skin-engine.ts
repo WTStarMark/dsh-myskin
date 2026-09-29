@@ -288,6 +288,14 @@ export function withoutDeclaration(rule: string | undefined, property: string): 
   return declarationPairs(rule ?? '').filter(([prop]) => prop !== property).map(([prop, value]) => prop + ': ' + value).join('; ')
 }
 
+/** First direct text node of an element that carries non-whitespace content. */
+function textCarrier(el: Element): Text | undefined {
+  for (const child of Array.from(el.childNodes)) {
+    if (child.nodeType === Node.TEXT_NODE && (child as Text).data.trim() !== '') return child as Text
+  }
+  return undefined
+}
+
 /**
  * The element that actually owns editable text for one selection.
  *
@@ -299,19 +307,496 @@ export function withoutDeclaration(rule: string | undefined, property: string): 
  * @returns the element to target, or undefined when nothing editable is inside.
  */
 export function textHostOf(el: Element): Element | undefined {
-  const direct = (node: Element): Text | undefined => {
-    for (const child of Array.from(node.childNodes)) {
-      if (child.nodeType === Node.TEXT_NODE && (child as Text).data.trim() !== '') return child as Text
-    }
-    return undefined
-  }
-  if (direct(el) !== undefined) return el
+  if (textCarrier(el) !== undefined) return el
   if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return el
   for (const child of Array.from(el.querySelectorAll('*'))) {
-    if (direct(child) !== undefined) return child
+    if (textCarrier(child) !== undefined) return child
   }
   return undefined
 }
+
+/**
+ * Interactive ancestors the canvas picker folds one click into.
+ *
+ * Clicking a button's inner SVG must select the button, not the icon path inside it.
+ */
+export const INTERACTIVE_SELECTOR = 'button, a, input, textarea, select, [role="button"], [role="tab"], [role="menuitem"], [role="option"], [role="menuitemcheckbox"], [role="checkbox"], [role="switch"]'
+
+/**
+ * Upstream marker of the composer's gray default copy.
+ *
+ * `dsh-client-ui-conversation` renders the placeholder of an empty composer as a
+ * sibling `<div data-composer-placeholder>` — the gray "描述你想要构建的内容 …" line that
+ * is the only text on a fresh conversation. Its CSS is
+ * `position: absolute; inset: 4px 8px auto 14px; pointer-events: none`, and that last
+ * declaration is why the picker could never reach it: `elementsFromPoint` skips every
+ * element that does not accept pointer events, so clicking the gray text selected the
+ * empty contenteditable behind it — a node with no text to edit at all.
+ */
+export const COMPOSER_PLACEHOLDER_SELECTOR = '[data-composer-placeholder]'
+
+/**
+ * Whether element geometry can be trusted in this document.
+ *
+ * jsdom (the test DOM) reports a 0x0 rect for every element and has no layout at
+ * all, while a browser always gives `body` a real box. Without the distinction a
+ * `display: none` candidate in a browser is indistinguishable from "this DOM has no
+ * geometry", and the picker would accept invisible overlays in one and reject every
+ * candidate in the other.
+ * @param doc - the document to probe.
+ * @returns true when real geometry is available.
+ */
+function layoutAvailable(doc: Document): boolean {
+  const rect = doc.body?.getBoundingClientRect()
+  return rect !== undefined && (rect.width > 0 || rect.height > 0)
+}
+
+/**
+ * Whether an overlay candidate is painted under the pointer.
+ * @param el - the candidate.
+ * @param clientX - pointer x.
+ * @param clientY - pointer y.
+ * @param layout - whether this document reports real geometry.
+ * @returns true when the candidate covers the point (always true without layout).
+ */
+function underPoint(el: Element, clientX: number, clientY: number, layout: boolean): boolean {
+  if (!layout) return true
+  const rect = el.getBoundingClientRect()
+  return rect.width > 0 && rect.height > 0
+    && clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom
+}
+
+/**
+ * Snap distance for the canvas alignment guides, in px.
+ *
+ * Deliberately small ("low sensitivity"): the guides correct a drag that is already
+ * almost aligned and stay out of the way otherwise — a 10px magnet makes precise
+ * placement impossible, a 1px one is invisible on a trackpad.
+ */
+export const SNAP_THRESHOLD = 4
+
+/** A box in viewport coordinates — what the guides align. */
+export interface SnapBox { left: number; top: number; width: number; height: number }
+
+/** Candidate alignment coordinates per axis. */
+export interface SnapTargets { x: readonly number[]; y: readonly number[] }
+
+/** One guide line to draw, in viewport coordinates. */
+export interface SnapLine { axis: 'x' | 'y'; at: number }
+
+/**
+ * Best snap for ONE axis.
+ *
+ * Every edge of the box (start, centre, end) may align with any target, and the closest
+ * candidate inside the threshold wins. The returned `delta` is what has to be added to the
+ * box's position for that edge to land exactly on the line.
+ * @param start - the box's left (or top).
+ * @param size - the box's width (or height).
+ * @param targets - candidate coordinates on this axis.
+ * @param threshold - maximum distance that still snaps.
+ * @returns the correction and its line, or undefined when nothing is close enough.
+ */
+export function snapAxis(start: number, size: number, targets: readonly number[], threshold: number = SNAP_THRESHOLD): { delta: number; line: number } | undefined {
+  const edges = [start, start + size / 2, start + size]
+  let best: { delta: number; line: number } | undefined
+  for (const edge of edges) {
+    for (const target of targets) {
+      const delta = target - edge
+      if (!Number.isFinite(delta) || Math.abs(delta) > threshold) continue
+      if (best === undefined || Math.abs(delta) < Math.abs(best.delta)) best = { delta, line: target }
+    }
+  }
+  return best
+}
+
+/**
+ * Snap a moving box on both axes.
+ * @param box - the box as it would be placed without snapping.
+ * @param targets - candidate lines collected at gesture start.
+ * @param threshold - maximum distance that still snaps.
+ * @returns the correction per axis (0 when free) and the lines to draw.
+ */
+export function snapMove(box: SnapBox, targets: SnapTargets, threshold: number = SNAP_THRESHOLD): { dx: number; dy: number; lines: SnapLine[] } {
+  const x = snapAxis(box.left, box.width, targets.x, threshold)
+  const y = snapAxis(box.top, box.height, targets.y, threshold)
+  const lines: SnapLine[] = []
+  if (x !== undefined) lines.push({ axis: 'x', at: x.line })
+  if (y !== undefined) lines.push({ axis: 'y', at: y.line })
+  return { dx: x?.delta ?? 0, dy: y?.delta ?? 0, lines }
+}
+
+/**
+ * Snap a uniform scale so an edge lands on a target line, keeping the centre fixed.
+ *
+ * Scaling happens around the centre, so a target line at distance `half` from that centre
+ * asks for a box twice as wide — the factor is that width over the current one. The
+ * candidate with the smallest pixel error wins, which is what keeps the magnet feeling
+ * "low sensitivity" rather than jumpy.
+ * @param box - the box at the un-snapped scale (centre included).
+ * @param scale - the un-snapped scale factor.
+ * @param targets - candidate lines collected at gesture start.
+ * @param threshold - maximum distance that still snaps.
+ * @returns the snapped scale and the lines to draw (empty when free).
+ */
+export function snapScale(box: SnapBox, scale: number, targets: SnapTargets, threshold: number = SNAP_THRESHOLD): { scale: number; lines: SnapLine[] } {
+  if (!(box.width > 0) || !(box.height > 0)) return { scale, lines: [] }
+  const cx = box.left + box.width / 2
+  const cy = box.top + box.height / 2
+  let best: { factor: number; error: number; line: SnapLine } | undefined
+  const consider = (axis: 'x' | 'y', center: number, current: number, lines: readonly number[]): void => {
+    for (const target of lines) {
+      // Which current edge is the candidate closest to this line?
+      const from = target >= center ? center + current / 2 : center - current / 2
+      const error = Math.abs(target - from)
+      if (!Number.isFinite(error) || error > threshold) continue
+      const wanted = Math.abs(target - center) * 2
+      if (!(wanted > 0)) continue
+      const factor = wanted / current
+      if (best === undefined || error < best.error) best = { factor, error, line: { axis, at: target } }
+    }
+  }
+  consider('x', cx, box.width, targets.x)
+  consider('y', cy, box.height, targets.y)
+  if (best === undefined) return { scale, lines: [] }
+  return { scale: Math.round(scale * best.factor * 100) / 100, lines: [best.line] }
+}
+
+/**
+ * Collect the alignment lines a drag inside one element should snap to.
+ *
+ * Deliberately narrow: the parent's box plus its visible children (the element's
+ * siblings) and the viewport centre — a page-wide scan would snap to things the user
+ * cannot even see. Collected ONCE per gesture: a `transform` never reflows the page, so
+ * these lines cannot move while the drag is running.
+ * @param el - the element being dragged.
+ * @param isOwn - predicate marking the editor's own UI (never a target).
+ * @param max - how many siblings to look at before giving up.
+ * @returns candidate coordinates per axis.
+ */
+export function snapTargetsFor(el: Element, isOwn: (el: Element) => boolean = () => false, max = 40): SnapTargets {
+  const x: number[] = []
+  const y: number[] = []
+  const push = (rect: { left: number; top: number; width: number; height: number }): void => {
+    if (rect.width === 0 && rect.height === 0) return
+    x.push(rect.left, rect.left + rect.width / 2, rect.left + rect.width)
+    y.push(rect.top, rect.top + rect.height / 2, rect.top + rect.height)
+  }
+  const parent = el.parentElement
+  if (parent !== null) {
+    push(parent.getBoundingClientRect())
+    let seen = 0
+    for (const sibling of Array.from(parent.children)) {
+      if (seen >= max) break
+      if (sibling === el || isOwn(sibling)) continue
+      seen += 1
+      push(sibling.getBoundingClientRect())
+    }
+  }
+  const view = el.ownerDocument.defaultView
+  if (view !== null) {
+    x.push(view.innerWidth / 2)
+    y.push(view.innerHeight / 2)
+  }
+  return { x, y }
+}
+
+/**
+ * One wheel/keyboard step on a numeric canvas control.
+ *
+ * Shared by the X/Y/scale fields so every nudge rounds and clamps the same way — these
+ * values go straight into CSS, where `12.340000000001px` is noise and an unclamped scale
+ * turns a widget into a smear.
+ * @param current - the value before the step.
+ * @param direction - +1 or -1.
+ * @param step - size of one step.
+ * @param min - lower clamp.
+ * @param max - upper clamp.
+ * @returns the stepped, rounded (2 decimals), clamped value.
+ */
+export function stepValue(current: number, direction: 1 | -1, step: number, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY): number {
+  const base = Number.isFinite(current) ? current : 0
+  const next = Math.min(max, Math.max(min, base + direction * step))
+  return Math.round(next * 100) / 100
+}
+
+/** A text-bearing element the browser's hit test can never return. */
+function isPointerlessTextOverlay(el: Element): boolean {
+  if (textCarrier(el) === undefined) return false
+  const view = el.ownerDocument.defaultView
+  return view !== null && view.getComputedStyle(el).pointerEvents === 'none'
+}
+
+/**
+ * The gray "default text" a click landed on, when the browser's own hit test cannot
+ * see it.
+ *
+ * Two tiers: the known upstream composer marker first, then any `pointer-events: none`
+ * text overlay painted under the pointer — a class of node `elementsFromPoint` never
+ * returns, which is exactly the class the composer placeholder belongs to.
+ *
+ * @param stack - `document.elementsFromPoint` output, topmost first.
+ * @param clientX - pointer x.
+ * @param clientY - pointer y.
+ * @param isOwn - predicate marking the editor's own UI, skipped entirely.
+ * @returns the overlay element to select, or undefined when the click is not on one.
+ */
+export function textOverlayAt(
+  stack: readonly Element[],
+  clientX: number,
+  clientY: number,
+  isOwn: (el: Element) => boolean = () => false,
+): Element | undefined {
+  const usable = stack.filter((el) => !isOwn(el))
+  if (usable.length === 0) return undefined
+  const layout = layoutAvailable(usable[0].ownerDocument)
+  // The stack holds the ANCESTORS of the hit node, so a pointer-invisible overlay is
+  // one of their direct children (the placeholder sits next to the contenteditable
+  // inside the composer's own wrapper). The stack element itself is included so the
+  // picker still behaves when a caller hands it an element list that does contain
+  // the overlay.
+  const candidates = (predicate: (el: Element) => boolean): Element[] => {
+    const found: Element[] = []
+    for (const host of usable) {
+      if (predicate(host) && underPoint(host, clientX, clientY, layout)) found.push(host)
+      for (const child of Array.from(host.children)) {
+        if (!isOwn(child) && predicate(child) && underPoint(child, clientX, clientY, layout)) found.push(child)
+      }
+    }
+    return found
+  }
+  const marker = candidates((el) => el.matches(COMPOSER_PLACEHOLDER_SELECTOR))
+  if (marker.length > 0) return marker[0]
+  const overlay = candidates(isPointerlessTextOverlay)
+  return overlay[0]
+}
+
+/**
+ * Resolve one canvas click to the element the editor should select.
+ *
+ * Order matters, and each rule exists because of a real report:
+ *   1. the editor's own UI always passes through (its panels stay clickable);
+ *   2. the nearest interactive ancestor beats the icon inside it (clicking a button
+ *      must select the button, not its SVG path);
+ *   3. a pointer-invisible text overlay beats the container behind it — this is what
+ *      makes the gray default text of a new conversation selectable and editable;
+ *   4. otherwise the hit element itself.
+ *
+ * @param stack - `document.elementsFromPoint` output, topmost first.
+ * @param clientX - pointer x.
+ * @param clientY - pointer y.
+ * @param isOwn - predicate marking elements the picker must ignore (own UI, #root, body…).
+ * @returns the element to select, or undefined when nothing usable is under the point.
+ */
+export function pickElementAt(
+  stack: readonly Element[],
+  clientX: number,
+  clientY: number,
+  isOwn: (el: Element) => boolean = () => false,
+): Element | undefined {
+  const usable = stack.filter((el) => !isOwn(el))
+  if (usable.length === 0) return undefined
+  const hit = usable[0]
+  const interactive = hit.closest(INTERACTIVE_SELECTOR)
+  if (interactive !== null && !isOwn(interactive)) return interactive
+  return textOverlayAt(usable, clientX, clientY, isOwn) ?? hit
+}
+
+/**
+ * CSS properties the canvas Inspector writes through its live preview.
+ *
+ * The preview REPLACES these declarations on the element's rule and keeps every other
+ * one, so hiding an element (visibility: hidden !important) or a hand-written geek rule
+ * survives a font-size tweak. Replacing the whole rule is what used to make a hidden
+ * element pop back the moment any style field was touched.
+ */
+export const INSPECTOR_PROPERTIES: readonly string[] = [
+  'font-size', 'font-family', 'font-weight', 'line-height', 'text-align', 'color',
+  'width', 'height', 'padding', 'margin', 'border-radius', 'border-width', 'border-color',
+  'background-color', 'background-image', 'background-size', 'background-position',
+  'box-shadow', 'opacity', 'transform',
+]
+
+/**
+ * Rewrite one rule's managed declarations, keeping everything else.
+ * @param existing - the element's current declaration block, or undefined.
+ * @param addition - the declarations the Inspector wants right now.
+ * @param managed - properties the Inspector owns (dropped from the existing rule first).
+ * @returns the merged declaration block ('' when nothing is left).
+ */
+export function withManagedDeclarations(
+  existing: string | undefined,
+  addition: string,
+  managed: readonly string[] = INSPECTOR_PROPERTIES,
+): string {
+  const kept = declarationPairs(existing ?? '').filter(([property]) => !managed.includes(property))
+  const next = declarationPairs(addition)
+  return [...kept, ...next].map(([property, value]) => property + ': ' + value).join('; ')
+}
+
+/**
+ * The `format()` keyword for an embedded font file.
+ *
+ * Browsers refuse a face whose format hint contradicts the bytes, so the hint is
+ * derived from the extension and anything unknown is refused by the caller instead of
+ * being embedded with a guess.
+ * @param fileName - the picked file's name.
+ * @returns the CSS format keyword, or undefined when the type is not supported.
+ */
+export function fontFormat(fileName: string): string | undefined {
+  const ext = fileName.toLowerCase().slice(fileName.lastIndexOf('.'))
+  if (ext === '.woff2') return 'woff2'
+  if (ext === '.woff') return 'woff'
+  if (ext === '.ttf') return 'truetype'
+  if (ext === '.otf') return 'opentype'
+  return undefined
+}
+
+/**
+ * One `@font-face` declaration block for an embedded font.
+ *
+ * Stored as an ordinary entry of the skin's `css` list with the selector
+ * {@link FONT_FACE_SELECTOR}: the engine emits `selector { rule }`, so the block lands
+ * in the stylesheet verbatim — no new schema field, no new apply path, and removing the
+ * entry un-embeds the font.
+ * @param family - the generated family name.
+ * @param url - the data URL of the font file.
+ * @param format - the CSS format keyword (see {@link fontFormat}).
+ * @returns the declaration block.
+ */
+export function fontFaceRule(family: string, url: string, format: string): string {
+  return "font-family: '" + family + "'; src: url('" + url + "') format('" + format + "'); font-display: swap;"
+}
+
+/**
+ * `transform` value for the canvas X/Y move + scale controls.
+ *
+ * Identity parts are omitted so an untouched axis never adds a no-op function, and an
+ * all-identity transform returns '' — the caller then drops the property entirely
+ * instead of pinning `transform: none` onto the element.
+ * @param x - horizontal offset in px.
+ * @param y - vertical offset in px.
+ * @param scale - uniform scale factor (1 = untouched).
+ * @returns the transform value, or '' when nothing is transformed.
+ */
+export function transformValue(x: number, y: number, scale: number): string {
+  const round = (value: number): string => String(Math.round(value * 100) / 100)
+  const parts: string[] = []
+  if (Number.isFinite(x) && Number.isFinite(y) && (x !== 0 || y !== 0)) parts.push('translate(' + round(x) + 'px, ' + round(y) + 'px)')
+  if (Number.isFinite(scale) && scale !== 1) parts.push('scale(' + round(scale) + ')')
+  return parts.join(' ')
+}
+
+/**
+ * Read back the X/Y/scale the canvas wrote into one rule.
+ *
+ * The panel mirrors these numbers while a canvas drag is running (the drag writes the
+ * rule directly, the fields follow), so parsing has to be the exact inverse of
+ * {@link transformValue} — and tolerant of anything else the element's transform might
+ * carry (a hand-written geek rule), which is simply ignored.
+ * @param rule - the element's declaration block, or undefined.
+ * @returns the offsets and scale; 0/0/1 when the rule has no transform of ours.
+ */
+export function parseTransform(rule: string | undefined): { x: number; y: number; scale: number } {
+  const found = declarationPairs(rule ?? '').find(([property]) => property === 'transform')?.[1] ?? ''
+  const translate = found.match(/translate\(\s*(-?[\d.]+)px\s*,\s*(-?[\d.]+)px\s*\)/)
+  const scale = found.match(/scale\(\s*(-?[\d.]+)\s*\)/)
+  return {
+    x: translate === null ? 0 : Number(translate[1]),
+    y: translate === null ? 0 : Number(translate[2]),
+    scale: scale === null ? 1 : Number(scale[1]),
+  }
+}
+
+/**
+ * Whether two declaration blocks say the same thing.
+ *
+ * Order and the `!important` flag are ignored on purpose: the Inspector preview always
+ * appends `!important` and may reorder properties, so a byte compare would report a
+ * change — and mark the draft dirty, and push an undo entry — every time an element that
+ * already has a saved rule is merely selected. Values are compared last-wins and
+ * whitespace-normalised.
+ * @param left - one declaration block.
+ * @param right - the other declaration block.
+ * @returns true when both carry the same properties with the same values.
+ */
+export function sameDeclarations(left: string | undefined, right: string | undefined): boolean {
+  const parse = (rule: string | undefined): Map<string, string> => {
+    const out = new Map<string, string>()
+    for (const [property, value] of declarationPairs(rule ?? '')) {
+      out.set(property, value.replace(/\s*!important\s*$/i, '').replace(/\s+/g, ' ').trim())
+    }
+    return out
+  }
+  const a = parse(left)
+  const b = parse(right)
+  if (a.size !== b.size) return false
+  for (const [property, value] of a) if (b.get(property) !== value) return false
+  return true
+}
+
+/**
+ * Human label for one element, used by the canvas hover/selection chips.
+ *
+ * Users pick by what they SEE (a nav label, an avatar, a card), not by a positional
+ * path, so the chip leads with tag + id + the first classes and ends with a trimmed
+ * snippet of the element's own text.
+ * @param el - the element to describe.
+ * @param maxText - longest text snippet before it is ellipsised.
+ * @returns a single-line label.
+ */
+export function elementLabel(el: Element, maxText = 28): string {
+  const tag = el.tagName.toLowerCase()
+  const id = el.id === '' ? '' : '#' + el.id
+  const classes = (el.getAttribute('class') ?? '').split(/\s+/).filter((name) => name !== '').slice(0, 2)
+  const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim()
+  const snippet = text === '' ? '' : ' · ' + (text.length > maxText ? text.slice(0, maxText) + '…' : text)
+  return tag + id + classes.map((name) => '.' + name).join('') + snippet
+}
+
+/**
+ * The nearest selectable ancestor of one element (the panel's parent button).
+ * @param el - the current selection.
+ * @param isOwn - predicate marking elements the picker must ignore.
+ * @returns the parent to select, or undefined at the top of the app tree.
+ */
+export function parentTarget(el: Element, isOwn: (el: Element) => boolean = () => false): Element | undefined {
+  const parent = el.parentElement
+  if (parent === null || isOwn(parent)) return undefined
+  return parent
+}
+
+/**
+ * The direct child of one element that sits under the pointer (the panel's child button).
+ *
+ * One level per press, so repeated presses walk down the real tree instead of jumping
+ * straight to the deepest node the browser hit.
+ * @param stack - elementsFromPoint output, topmost first.
+ * @param el - the current selection.
+ * @param isOwn - predicate marking elements the picker must ignore.
+ * @returns the child to select, or undefined when the pointer is not inside the element.
+ */
+export function childTargetIn(
+  stack: readonly Element[],
+  el: Element,
+  isOwn: (el: Element) => boolean = () => false,
+): Element | undefined {
+  const direct: Element[] = []
+  for (const candidate of stack) {
+    if (candidate === el || isOwn(candidate) || !el.contains(candidate)) continue
+    let node: Element = candidate
+    while (node.parentElement !== null && node.parentElement !== el) node = node.parentElement
+    if (node.parentElement === el && !direct.includes(node)) direct.push(node)
+  }
+  return direct[0]
+}
+
+/**
+ * Selector used for embedded `@font-face` blocks inside the skin's `css` list.
+ *
+ * The engine renders every entry as `selector { rule }`, so this selector must NOT
+ * receive a trailing rule body — it IS the at-rule.
+ */
+export const FONT_FACE_SELECTOR = '@font-face'
 
 /**
  * Attributes that survive portal remounting, in preference order, with the

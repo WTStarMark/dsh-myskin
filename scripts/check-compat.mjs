@@ -228,6 +228,8 @@ function checkInstall(dshRoot) {
   checkContract('--dsh-windows-content-radius', 'Windows content corner radius (the column owns the wallpaper and clips it)')
   checkContract('composerSeat', 'composer seat class ([class*="_composerSeat"])')
   checkContract('data-composer-seat', 'composer seat marker (data-composer-seat)')
+  checkContract('data-composer-input', 'composer editable surface (the gray default text is painted over it)')
+  checkContract('data-composer-placeholder', 'composer gray default text (pointer-events:none, so the picker resolves it by marker)')
   checkContract('"data-slot"', 'slot host marker (data-slot="<slotKey>")')
   checkContract('conversation.session', 'conversation content slot (the token hand-back inside the column)')
   checkContract('conversation.view', 'conversation view slot (the token hand-back inside the column)')

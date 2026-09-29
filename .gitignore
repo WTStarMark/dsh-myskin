@@ -1,4 +1,42 @@
+# ── 依赖与构建中间产物 ─────────────────────────────────────────────
+# lib/ 与 package-lock.json 是交付物，必须提交；下面这些不是。
 node_modules/
-*.log
-.DS_Store
 .tmp/
+*.tsbuildinfo
+*.tgz
+
+# ── 打包 / 发布产物（本地生成，不进仓库）────────────────────────────
+*.zip
+*.tar.gz
+*.dshskin
+dsh-myskin-*/
+dsh-myskin-repo-*/
+
+# ── 日志与临时文件 ─────────────────────────────────────────────────
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+*.pid
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# ── 编辑器 / 操作系统 ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── 本地环境与凭据（绝不入库）──────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.credentials*

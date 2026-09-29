@@ -1,7 +1,8 @@
 /**
- * The shipped example theme: it must apply through the real engine, carry a
- * strength marker, and revert byte-exactly. This keeps a broken palette or an
- * unknown token from shipping unnoticed.
+ * The fixture theme (a full-size, real-world document: 43 tokens, a CSS layer and an
+ * embedded wallpaper): it must apply through the real engine, carry a strength marker,
+ * and revert byte-exactly. This keeps a broken palette or an unknown token from
+ * shipping unnoticed.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -11,7 +12,7 @@ import { loadTs } from './helpers/load-ts.mjs'
 
 const engine = await loadTs('src/client/skin-engine.ts')
 
-const read = (name) => JSON.parse(readFileSync(new URL('../examples/' + name, import.meta.url), 'utf8'))
+const read = (name) => JSON.parse(readFileSync(new URL('./fixtures/' + name, import.meta.url), 'utf8'))
 const tokensOnly = read('xingye-theme.tokens-only.json')
 const full = read('xingye-theme.skin.json')
 

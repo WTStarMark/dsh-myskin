@@ -475,3 +475,274 @@ test('an embedded image still tags when its selector matches several nodes', asy
   assert.equal(tagged[0].id, 'first')
   override.dispose()
 })
+
+/**
+ * An empty composer exactly as dsh-client-ui-conversation renders it: the editable
+ * surface and the gray placeholder are siblings, and the placeholder is
+ * `position:absolute; pointer-events:none` — so `elementsFromPoint` never returns it.
+ */
+const COMPOSER = [
+  '<div id="root"><div class="app_frame_hash"><div class="composer_grow_hash">',
+  '<div class="composer_input_hash" contenteditable="true" role="textbox" data-composer-input="true" data-placeholder="描述你想要构建的内容, / 调用指令"></div>',
+  '<div aria-hidden="true" class="composer_placeholder_hash" data-composer-placeholder="true" style="pointer-events:none">描述你想要构建的内容, / 调用指令</div>',
+  '</div></div></div>',
+].join('')
+
+test('the picker reaches the gray default text of an empty composer', () => {
+  const window = setup()
+  window.document.body.innerHTML = COMPOSER
+  const doc = window.document
+  const input = doc.querySelector('[data-composer-input]')
+  const placeholder = doc.querySelector('[data-composer-placeholder]')
+  // What a real click on that line produces: the editable first, then its ancestors.
+  // The placeholder itself is missing from the list — it accepts no pointer events.
+  const stack = [input, input.parentElement, doc.querySelector('.app_frame_hash'), doc.getElementById('root'), doc.body, doc.documentElement]
+  const own = (el) => el === doc.body || el === doc.documentElement || el.id === 'root'
+  assert.equal(engine.pickElementAt(stack, 10, 10, own), placeholder)
+  // The element it resolves to must be one whose text the editor can actually replace:
+  // the empty contenteditable behind it has no text node at all.
+  assert.equal(engine.textHostOf(input), undefined)
+  assert.equal(engine.textHostOf(placeholder), placeholder)
+})
+
+test('the picker still folds a click on a label into its button', () => {
+  const window = setup()
+  window.document.body.innerHTML = '<div id="root"><button id="go"><span id="label">Go</span></button></div>'
+  const doc = window.document
+  const stack = [doc.getElementById('label'), doc.getElementById('go'), doc.getElementById('root'), doc.body]
+  assert.equal(engine.pickElementAt(stack, 5, 5), doc.getElementById('go'))
+})
+
+test('a pointer-invisible text overlay is pickable even without the composer marker', () => {
+  const window = setup()
+  window.document.body.innerHTML = '<div id="root"><div id="wrap"><div id="ghost" style="pointer-events:none">Gray</div></div></div>'
+  const doc = window.document
+  const stack = [doc.getElementById('wrap'), doc.getElementById('root'), doc.body]
+  assert.equal(engine.pickElementAt(stack, 5, 5), doc.getElementById('ghost'))
+})
+
+test('own UI and pointer-invisible decoration without text are never picked', () => {
+  const window = setup()
+  window.document.body.innerHTML = '<div id="root"><div id="wrap"><div id="deco" style="pointer-events:none"></div></div></div>'
+  const doc = window.document
+  const wrap = doc.getElementById('wrap')
+  assert.equal(engine.pickElementAt([wrap, doc.getElementById('root')], 5, 5), wrap)
+  assert.equal(engine.pickElementAt([wrap], 5, 5, () => true), undefined)
+})
+
+test('the gray default text of a new conversation is replaceable and reverts byte-exactly', () => {
+  const window = setup()
+  window.document.body.innerHTML = COMPOSER
+  const doc = window.document
+  const placeholder = doc.querySelector('[data-composer-placeholder]')
+  const before = doc.body.outerHTML
+  const theme = fakeTheme()
+  const override = engine.applySkin(theme, {
+    ...SKIN,
+    css: [],
+    layers: [],
+    text: [{ selector: engine.selectorOf(placeholder), before: '描述你想要构建的内容, / 调用指令', after: '你想让我做什么？' }],
+  })
+  assert.equal(placeholder.textContent, '你想让我做什么？')
+  // React rebuilding the node rewrites the copy; the observer must re-apply the override.
+  placeholder.textContent = '描述你想要构建的内容, / 调用指令'
+  override.dispose()
+  assert.equal(doc.body.outerHTML, before)
+})
+
+test('the Inspector preview keeps declarations it does not own', () => {
+  // Hiding an element used to be undone by the next font-size tweak: the preview
+  // replaced the whole rule. Only the properties the Inspector owns may be rewritten.
+  const merged = engine.withManagedDeclarations('color: red; visibility: hidden !important', 'font-size: 20px')
+  assert.equal(merged, 'visibility: hidden !important; font-size: 20px')
+  // Re-touching a managed property replaces its old value instead of stacking it.
+  assert.equal(engine.withManagedDeclarations('font-size: 12px; display: none !important', 'font-size: 20px'), 'display: none !important; font-size: 20px')
+  // Clearing every field leaves the unmanaged declarations alone.
+  assert.equal(engine.withManagedDeclarations('visibility: hidden !important', ''), 'visibility: hidden !important')
+  assert.equal(engine.withManagedDeclarations(undefined, ''), '')
+  assert.deepEqual(engine.INSPECTOR_PROPERTIES.includes('background-size'), true)
+})
+
+test('transformValue emits only the axes that actually move', () => {
+  assert.equal(engine.transformValue(0, 0, 1), '')
+  assert.equal(engine.transformValue(12, 0, 1), 'translate(12px, 0px)')
+  assert.equal(engine.transformValue(0, -8, 1), 'translate(0px, -8px)')
+  assert.equal(engine.transformValue(0, 0, 1.25), 'scale(1.25)')
+  assert.equal(engine.transformValue(4.5, 2.25, 0.5), 'translate(4.5px, 2.25px) scale(0.5)')
+  // Sub-pixel drag noise is rounded away so the stylesheet stays readable.
+  assert.equal(engine.transformValue(4.126, 2, 1), 'translate(4.13px, 2px)')
+  // The Inspector owns transform, so a preview that drops it must clear it.
+  assert.ok(engine.INSPECTOR_PROPERTIES.includes('transform'))
+  assert.ok(engine.INSPECTOR_PROPERTIES.includes('font-family'))
+  assert.equal(engine.withManagedDeclarations('transform: scale(2); visibility: hidden !important', ''), 'visibility: hidden !important')
+})
+
+test('parseTransform is the inverse of transformValue', () => {
+  for (const [x, y, scale] of [[0, 0, 1], [12, -4, 1], [0, 0, 1.25], [4.5, 2.25, 0.5]]) {
+    const value = engine.transformValue(x, y, scale)
+    const rule = value === '' ? 'color: red' : 'color: red; transform: ' + value + ' !important'
+    assert.deepEqual(engine.parseTransform(rule), { x, y, scale })
+  }
+  // A hand-written transform is not ours: the fields must not pretend to own it.
+  assert.deepEqual(engine.parseTransform('transform: translateX(-50%) rotate(3deg)'), { x: 0, y: 0, scale: 1 })
+  assert.deepEqual(engine.parseTransform(undefined), { x: 0, y: 0, scale: 1 })
+})
+
+test('embedded fonts become an @font-face entry of the css list', () => {
+  assert.equal(engine.FONT_FACE_SELECTOR, '@font-face')
+  assert.equal(engine.fontFormat('Inter.woff2'), 'woff2')
+  assert.equal(engine.fontFormat('Songti.TTF'), 'truetype')
+  assert.equal(engine.fontFormat('X.otf'), 'opentype')
+  assert.equal(engine.fontFormat('X.woff'), 'woff')
+  assert.equal(engine.fontFormat('X.ttc'), undefined)
+  assert.equal(engine.fontFormat('noext'), undefined)
+  const rule = engine.fontFaceRule('myskin-font-1', 'data:font/woff2;base64,AAAA', 'woff2')
+  assert.match(rule, /^font-family: 'myskin-font-1'; src: url\('data:font\/woff2;base64,AAAA'\) format\('woff2'\); font-display: swap;$/)
+  // The engine renders css entries as `selector { rule }`, which is a valid at-rule here.
+  // The engine renders css entries as `selector { rule }`, which is a valid at-rule here.
+  const composed = [{ selector: engine.FONT_FACE_SELECTOR, rule }].map((r) => r.selector + ' { ' + r.rule + ' }').join(String.fromCharCode(10))
+  assert.match(composed, /^@font-face \{ font-family: 'myskin-font-1';/)
+})
+
+test('an embedded font plus an element transform apply and revert through the real engine', () => {
+  const window = setup()
+  window.document.body.innerHTML = '<div id="root"><button id="go">Send</button></div>'
+  const before = window.document.body.outerHTML
+  const theme = fakeTheme()
+  const family = 'myskin-font-t1'
+  const elementRule = engine.withManagedDeclarations(undefined,
+    "font-family: '" + family + "' !important; transform: " + engine.transformValue(12, -4, 1.2) + " !important")
+  const override = engine.applySkin(theme, {
+    ...SKIN,
+    text: [],
+    layers: [],
+    css: [
+      { selector: engine.FONT_FACE_SELECTOR, rule: engine.fontFaceRule(family, 'data:font/woff2;base64,AAAA', 'woff2') },
+      { selector: '#go', rule: elementRule },
+    ],
+  })
+  const sheet = window.document.getElementById('dsh-myskin-rule').textContent
+  // The css entry with the at-rule selector lands as a real @font-face block…
+  assert.match(sheet, /@font-face \{ font-family: 'myskin-font-t1'; src: url\('data:font\/woff2;base64,AAAA'\) format\('woff2'\); font-display: swap; \}/)
+  // …and the element gets both the family and the move+scale in one rule.
+  assert.match(sheet, /#go \{ font-family: 'myskin-font-t1' !important; transform: translate\(12px, -4px\) scale\(1\.2\) !important \}/)
+  override.dispose()
+  assert.equal(window.document.body.outerHTML, before)
+})
+
+test('snapMove aligns an edge only when it is already close', () => {
+  const targets = { x: [152, 400], y: [300] }
+  // Box 100..200: its centre (150) is 2px from the 152 line → snapped, and reported.
+  const near = engine.snapMove({ left: 100, top: 500, width: 100, height: 20 }, targets, 4)
+  assert.equal(near.dx, 2)
+  assert.equal(near.dy, 0)
+  assert.deepEqual(near.lines, [{ axis: 'x', at: 152 }])
+  // 5px away is outside the 4px threshold: the magnet stays off ("low sensitivity").
+  const far = engine.snapMove({ left: 100, top: 500, width: 100, height: 20 }, { x: [155 + 50], y: [] }, 4)
+  assert.equal(far.dx, 0)
+  assert.deepEqual(far.lines, [])
+  // Both axes snap independently; the right edge (200) can be the one that lands.
+  const both = engine.snapMove({ left: 100, top: 298, width: 100, height: 20 }, { x: [201], y: [310] }, 4)
+  assert.equal(both.dx, 1)
+  assert.equal(both.dy, 2)
+  assert.deepEqual(both.lines, [{ axis: 'x', at: 201 }, { axis: 'y', at: 310 }])
+  // The CLOSEST candidate wins when several are in range (149 is 1px from the centre).
+  const closest = engine.snapMove({ left: 100, top: 0, width: 100, height: 10 }, { x: [103, 149], y: [] }, 4)
+  assert.equal(closest.dx, -1)
+  assert.deepEqual(closest.lines, [{ axis: 'x', at: 149 }])
+})
+
+test('snapScale snaps the size around a fixed centre', () => {
+  // Centre 300, width 200 (200..400), scale 1.
+  const box = { left: 200, top: 100, width: 200, height: 100 }
+  const targets = { x: [403], y: [] }
+  const snapped = engine.snapScale(box, 1, targets, 4)
+  assert.equal(snapped.scale, 1.03)
+  assert.deepEqual(snapped.lines, [{ axis: 'x', at: 403 }])
+  // Out of range → untouched.
+  assert.deepEqual(engine.snapScale(box, 1.25, { x: [410], y: [] }, 4), { scale: 1.25, lines: [] })
+  // Vertical targets work the same way (box 100..200 tall, centre 150, bottom 200):
+  // a line 3px above the bottom asks for height 94 → scale 2 * 0.94.
+  const vertical = engine.snapScale(box, 2, { x: [], y: [197] }, 4)
+  assert.equal(vertical.scale, 1.88)
+  assert.deepEqual(vertical.lines, [{ axis: 'y', at: 197 }])
+  // A line on the far side of the centre is not a candidate for the near edge.
+  assert.deepEqual(engine.snapScale(box, 2, { x: [], y: [148] }, 4), { scale: 2, lines: [] })
+  // A degenerate box never produces Infinity/NaN.
+  assert.deepEqual(engine.snapScale({ left: 0, top: 0, width: 0, height: 0 }, 1, { x: [3], y: [] }, 4), { scale: 1, lines: [] })
+  assert.equal(engine.SNAP_THRESHOLD, 4)
+})
+
+test('stepValue rounds, clamps and survives garbage input', () => {
+  // Wheel steps on the canvas X/Y fields: whole pixels, Shift = ten.
+  assert.equal(engine.stepValue(0, 1, 1), 1)
+  assert.equal(engine.stepValue(4, -1, 1), 3)
+  assert.equal(engine.stepValue(4, 1, 10), 14)
+  // Scale steps are fractional and clamped to the usable range.
+  assert.equal(engine.stepValue(1, 1, 0.05), 1.05)
+  assert.equal(engine.stepValue(1, -1, 0.05), 0.95)
+  assert.equal(engine.stepValue(3, 1, 0.25, 0.2, 3), 3)
+  assert.equal(engine.stepValue(0.2, -1, 0.25, 0.2, 3), 0.2)
+  // Sub-pixel noise never reaches the stylesheet.
+  assert.equal(engine.stepValue(0.1, 1, 0.2), 0.3)
+  assert.equal(engine.stepValue(Number.NaN, 1, 1), 1)
+})
+
+test('sameDeclarations ignores order and !important, but not values', () => {
+  // The Inspector re-emits a saved rule with !important and its own order on selection;
+  // that must read as "nothing changed" so the draft does not turn dirty for free.
+  assert.equal(engine.sameDeclarations('color: red; font-size: 12px', 'font-size: 12px !important; color: red !important'), true)
+  assert.equal(engine.sameDeclarations(undefined, ''), true)
+  assert.equal(engine.sameDeclarations('', '   '), true)
+  assert.equal(engine.sameDeclarations('color: red', 'color: blue'), false)
+  assert.equal(engine.sameDeclarations('color: red', 'color: red; visibility: hidden !important'), false)
+  // A real edit through the Inspector pipeline stays a change.
+  assert.equal(engine.sameDeclarations('font-size: 12px', engine.withManagedDeclarations('font-size: 12px', 'font-size: 20px !important')), false)
+})
+
+test('elementLabel names an element the way a user recognises it', () => {
+  const window = setup()
+  window.document.body.innerHTML = [
+    '<div id="root"><button id="go" class="btn primary extra">  Send   now  </button>',
+    '<div class="card"></div></div>',
+  ].join('')
+  const doc = window.document
+  assert.equal(engine.elementLabel(doc.getElementById('go')), 'button#go.btn.primary · Send now')
+  assert.equal(engine.elementLabel(doc.querySelector('.card')), 'div.card')
+  assert.equal(engine.elementLabel(doc.getElementById('go'), 4), 'button#go.btn.primary · Send…')
+})
+
+test('parent/child traversal walks one real level at a time', () => {
+  const window = setup()
+  window.document.body.innerHTML = '<div id="root"><div id="card"><div id="row"><span id="label">Hi</span></div></div></div>'
+  const doc = window.document
+  const card = doc.getElementById('card')
+  const row = doc.getElementById('row')
+  const label = doc.getElementById('label')
+  const own = (el) => el === doc.body || el === doc.documentElement || el.id === 'root'
+  assert.equal(engine.parentTarget(label, own), row)
+  assert.equal(engine.parentTarget(card, own), undefined)
+  // A click stack for the label: the deepest node first, then its ancestors.
+  const stack = [label, row, card, doc.getElementById('root'), doc.body]
+  assert.equal(engine.childTargetIn(stack, card, own), row)
+  assert.equal(engine.childTargetIn(stack, row, own), label)
+  assert.equal(engine.childTargetIn(stack, label, own), undefined)
+})
+
+test('re-applying a text override survives a React-style rebuild of the node', async () => {
+  const window = setup()
+  window.document.body.innerHTML = COMPOSER
+  const doc = window.document
+  const placeholder = doc.querySelector('[data-composer-placeholder]')
+  const theme = fakeTheme()
+  const override = engine.applySkin(theme, {
+    ...SKIN,
+    css: [],
+    layers: [],
+    text: [{ selector: engine.selectorOf(placeholder), before: '描述你想要构建的内容, / 调用指令', after: '你想让我做什么？' }],
+  })
+  placeholder.textContent = '描述你想要构建的内容, / 调用指令'
+  await flush()
+  assert.equal(placeholder.textContent, '你想让我做什么？')
+  override.dispose()
+})
