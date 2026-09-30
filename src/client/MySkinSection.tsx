@@ -9,26 +9,32 @@
  *     previewed live through an owned style tag.
  */
 
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import type { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
+import type { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, MutableRefObject, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { Button, Pill, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { IconClose, IconPersonalization, IconPlus, IconTrash } from './icons.ts'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
-import { parseSkin, EMPTY_SKIN, type BlendMode, type CssRule, type EmbeddedImage, type NamedSkin, type SkinCanvas, type SkinSettings, type TokenOverrides } from '../skin-schema.ts'
+import { imageModeOf, parseSkin, EMPTY_SKIN, type AnchorKind, type BlendMode, type CssRule, type EmbeddedImage, type ImageAnchor, type ImageMode, type NamedSkin, type SkinCanvas, type SkinSettings, type TokenOverrides } from '../skin-schema.ts'
 import {
-  COMPOSER_PLACEHOLDER_SELECTOR, FONT_FACE_SELECTOR, HIDE_DECLARATION, REMOVE_DECLARATION,
-  backgroundSurfaceRules, childTargetIn, currentSettingsPageKey, desktopFrameTint, elementLabel, fontFaceRule,
-  fontFormat, mergeDeclaration, parentTarget, parseTransform, pickElementAt, readBackgroundOpacity, selectorOf,
+  COMPOSER_PLACEHOLDER_SELECTOR, DRAFT_STYLE_ID, FONT_FACE_SELECTOR, HIDE_DECLARATION, REMOVE_DECLARATION,
+  anchorTextOf, backgroundSurfaceRules, childTargetIn, currentSettingsPageKey, declarationOf, desktopFrameTint, elementLabel,
+  fontFaceRule, fontFormat, keepStylesheetLast, mergeDeclaration, mountImageOverlay, naturalDisplayOf, parentTarget, parseTransform,
+  pickElementAt, readBackgroundOpacity, removedControls, resolveImageAnchor, resolveImageTargets, selectorOf,
   SNAP_THRESHOLD, snapMove, snapScale, snapTargetsFor, stepValue, surfaceTint, textHostOf, sameDeclarations,
-  transformValue, wallpaperRules, withBackgroundOpacity,
-  withManagedDeclarations, withoutDeclaration,
+  transformEdit, transformPreview, transformValue, wallpaperRules, withAllControlsRestored, withBackgroundOpacity,
+  withControlRestored, withManagedDeclarations, withoutDeclaration,
 } from './skin-engine.ts'
+import { filterFamilies, quoteFamily, scanFonts, type FontScan } from './fonts.ts'
+import { ANCHOR_COMPONENTS, anchorKey, anchorLabel, anchorOf } from './anchors.ts'
+import { FONT_ROLES, roleFont, roleStackFor, withRoleFont, type FontRole } from './font-roles.ts'
+import { elementGroupFor, gapLength, gapOf, gapSelectorFor, groupLabelKey, moveRuleToBlock, withGapRule, type EditScope, type ElementGroup } from './groups.ts'
+import { canvasLooksOversized, diagnoseCanvas } from './save-report.ts'
 import { editorFrameRules, pulseWindowDragRecall, readDesktopShell } from './desktop.ts'
 import { attachWheelNudge, mountCanvasUi, setDrawCursor } from './canvas-ui.ts'
-import type { SnapLine } from './skin-engine.ts'
+import type { ImageOverlay, RemovedControl, SnapLine } from './skin-engine.ts'
 import { DSHSKIN_EXTENSION, packSkin, toArrayBuffer, unpackSkin } from './dshskin.ts'
 import type { MySkinKey } from './locales.ts'
 import { PRESETS } from './presets.ts'
@@ -152,6 +158,50 @@ const HIDE_PAIR = declarationPair(HIDE_DECLARATION)
 /** "Remove this control" as a property/value pair. */
 const REMOVE_PAIR = declarationPair(REMOVE_DECLARATION)
 
+/**
+ * Copy key for one whole-app font role's label.
+ * @param role - the role.
+ * @returns the locale key.
+ */
+function roleLabelKey(role: FontRole): MySkinKey {
+  return role === 'ui' ? 'roleUi' : role === 'text' ? 'roleText' : 'roleCode'
+}
+
+/**
+ * An anchor that pins an image to one element, with a readable label frozen next to it.
+ * @param el - the element to follow.
+ * @returns the anchor.
+ */
+function anchorFromElement(el: Element): ImageAnchor {
+  return { kind: 'element', value: selectorOf(el), label: elementLabel(el, 24) }
+}
+
+/**
+ * The anchor an image gets when the user switches to another anchor KIND.
+ *
+ * Switching kind is not a re-target by itself, so the value is carried over whenever it still
+ * makes sense — and when it does not, the default is the obvious one: the copy of the element
+ * that is currently selected (「选中那行字 → 锚定为文字」).
+ * @param kind - the kind the user picked.
+ * @param img - the image being anchored.
+ * @param target - the element selected on the canvas right now.
+ * @returns the new anchor.
+ */
+function defaultAnchor(kind: AnchorKind, img: EmbeddedImage, target: Element, groupAnchor?: ImageAnchor): ImageAnchor {
+  // 整组: the selector of the block the selection belongs to (absent when there is no block).
+  if (kind === 'group') return groupAnchor ?? anchorFromElement(target)
+  if (kind === 'component') {
+    const current = anchorOf(img)
+    const existing = current.kind === 'component' ? current.value : ''
+    return { kind: 'component', value: existing !== '' ? existing : ANCHOR_COMPONENTS[0].id, label: '' }
+  }
+  if (kind === 'text') {
+    const copy = anchorTextOf(target)
+    return { kind: 'text', value: copy ?? '', label: copy ?? '' }
+  }
+  return anchorFromElement(target)
+}
+
 /** Try to normalize a CSS color string to a #rrggbb hex (for <input type=color>). */
 function toHex(v: string): string | undefined {
   if (v === 'transparent') return undefined
@@ -217,9 +267,18 @@ function persist(scope: ConfigForm<SkinSettings>, skin: SkinSettings): Promise<P
  * @param t - the page's dictionary lookup.
  * @returns the message to show in the editor.
  */
-function saveFailureText(report: PersistReport, t: (key: MySkinKey) => string): string {
+function saveFailureText(report: PersistReport, t: (key: MySkinKey) => string, canvas?: SkinCanvas): string {
   if (report.failed.includes('*')) return t('applyFailed')
-  return t('saveFailed') + report.failed.join(', ')
+  const base = t('saveFailed') + report.failed.join(', ')
+  if (canvas === undefined || !report.failed.includes('canvas')) return base
+  // "canvas" alone is unactionable: name the two reasons it actually has. See save-report.ts —
+  // a stale Host schema (a value the client just learned to write fails validation for the whole
+  // field) and an oversized payload (images ride inside the canvas as data URLs) look identical
+  // from the outside, so the message carries the measurements that tell them apart.
+  const diagnosis = diagnoseCanvas(canvas)
+  return canvasLooksOversized(diagnosis)
+    ? base + ' —— ' + t('saveFailedCanvasLarge').replace('{n}', String(Math.round(diagnosis.bytes / 1024)))
+    : base + ' —— ' + t('saveFailedCanvas')
 }
 
 /** Which built-in preset the current token overrides match (if any). */
@@ -327,7 +386,7 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
   }
 
   const update = (next: SkinSettings): void => {
-    void persistNow(next).then((report) => { if (!report.ok) setNotice(saveFailureText(report, t)) })
+    void persistNow(next).then((report) => { if (!report.ok) setNotice(saveFailureText(report, t, next.canvas)) })
   }
 
   const applyNow = (): void => {
@@ -677,6 +736,82 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
   const pageBgRef = useRef<HTMLInputElement | null>(null)
   const [, bump] = useState(0)
   const liveStyleRef = useRef<HTMLStyleElement | null>(null)
+  /**
+   * Controls restored from the recycle bin while the COMMITTED skin still removes them.
+   *
+   * Removal is one CSS declaration, so clearing it in the draft is the whole edit until
+   * that removal has been saved — after that the committed stylesheet keeps saying
+   * `display: none` under the same selector, and the editor has to out-shout it (see
+   * {@link naturalDisplayOf}) until the next 保存. Selector → natural `display`.
+   */
+  const [restoredLive, setRestoredLive] = useState<Record<string, string>>({})
+  /** Whether the Inspector edits the selected element alone or its whole block. */
+  const [scope, setScope] = useState<EditScope>('single')
+  /**
+   * The block the current selection belongs to.
+   *
+   * Recomputed when the selection (or the re-pick epoch) changes, not on every render: it scans
+   * the document for the element's peers, and this component re-renders on every frame of a drag.
+   */
+  const group = useMemo<ElementGroup | undefined>(
+    () => (selected === undefined ? undefined : elementGroupFor(selected, document)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selected, selectionEpoch],
+  )
+  /** The selector every edit is written to — the block's when 整组 is on and there is one. */
+  const activeSelector = scope === 'group' && group !== undefined
+    ? group.selector
+    : (selected === undefined ? '' : selectorOf(selected))
+  /**
+   * Switch the edit scope, carrying what is already styled onto the block.
+   *
+   * 整组 means "the edit I already made now covers the whole kind", and the panel only writes on
+   * the NEXT field change — so without moving the declarations here, toggling the scope looks
+   * like it did nothing at all (exactly the report). One snapshot, so Ctrl+Z takes it back.
+   * @param next - the scope to switch to.
+   */
+  /**
+   * The selector that targets the space BETWEEN the block's members, when they are siblings.
+   *
+   * Undefined means "the gap is not the block's business here" (members nested under different
+   * parents): the field then explains itself instead of writing a rule that matches nothing.
+   */
+  const gapSelector = useMemo(
+    () => (scope === 'group' && group !== undefined ? gapSelectorFor(group, document) : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scope, group, selectionEpoch],
+  )
+  /** The gap as written on the page ('' when the block has none). */
+  const gap = gapSelector === undefined ? '' : gapOf(draft.css, gapSelector)
+  /** One snapshot per editing run: dragging the gap is a single undo step, like the fields. */
+  const gapEditRef = useRef(false)
+  /**
+   * Set (or clear) the gap between the members of the current block.
+   * @param value - a CSS length, or '' to clear.
+   */
+  const setGap = (value: string): void => {
+    if (gapSelector === undefined) return
+    if (!gapEditRef.current) { snapshot(); gapEditRef.current = true }
+    setDraft((prev) => ({ ...prev, css: withGapRule(prev.css, gapSelector, value) }))
+  }
+  const changeScope = (next: EditScope): void => {
+    if (next === scope) return
+    setScope(next)
+    if (next !== 'group' || group === undefined || selected === undefined) return
+    const own = selectorOf(selected)
+    if (own === group.selector) return
+    snapshot()
+    setDraft((prev) => ({ ...prev, css: moveRuleToBlock(prev.css, own, group.selector) }))
+  }
+  /**
+   * The images the COMMITTED document carries.
+   *
+   * While the editor is open it owns the embed tags (it previews the draft, which may have
+   * moved or deleted an image); when it closes — saving OR discarding — the page has to show
+   * exactly what the document says. This is that reference point, and it follows every
+   * successful 保存 / 应用.
+   */
+  const committedImagesRef = useRef<readonly EmbeddedImage[]>(initial.canvas.images)
 
   // Undo/redo history (deep-copied snapshots).
   const [, bumpHistory] = useState(0)
@@ -831,12 +966,23 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
         rules.push(img.selector + '::after { content: ""; position: absolute; inset: 0; background-image: url("' + img.url + '"); background-repeat: no-repeat; background-position: ' + img.x + 'px ' + img.y + 'px; background-size: ' + img.w + 'px ' + img.h + 'px; opacity: ' + (img.opacity ?? 1) + '; pointer-events: none; z-index: 1;' + blendCss + ' }')
       }
     }
+    // A control restored from the recycle bin while the COMMITTED document still removes
+    // it: dropping the declaration from the draft is not enough, because the committed
+    // skin is a second stylesheet with the same selector and keeps saying `display: none`
+    // until the next 保存. The natural `display` measured at restore time is emitted here,
+    // in the editor's own layer, so the element is visible again right away — and it never
+    // reaches the document: entries whose removal is back in the draft are dropped, and
+    // the whole map is cleared on 保存 / 应用 / 还原.
+    const removedNow = new Set(removedControls(draft.css).map((entry) => entry.selector))
+    for (const [selector, display] of Object.entries(restoredLive)) {
+      if (!removedNow.has(selector)) rules.push(selector + ' { display: ' + display + ' !important }')
+    }
     const d = document
     if (rules.length > 0) {
       if (liveStyleRef.current === null) {
         const tag = d.createElement('style')
         tag.dataset.live = 'dsh-myskin'
-        tag.id = 'dsh-myskin-live'
+        tag.id = DRAFT_STYLE_ID
         d.head.appendChild(tag)
         liveStyleRef.current = tag
       }
@@ -845,12 +991,93 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
       liveStyleRef.current.remove()
       liveStyleRef.current = null
     }
-  }, [draft.css, draft.canvas.background, draft.canvas.backgroundOpacity, draft.canvas.images])
+  }, [draft.css, draft.canvas.background, draft.canvas.backgroundOpacity, draft.canvas.images, restoredLive])
 
-  // Remove the live style tag and every live text patch on unmount.
+  /**
+   * The draft's images as one string: id, painting mode and anchor.
+   *
+   * Both preview paths (the tag for 组件嵌入, the overlay for 组件锚定) have to react when any of
+   * those CHANGE — a new image, a re-anchor, a mode switch, a removal — but not on every frame
+   * of an image drag, which rewrites the images array for each pointer move.
+   */
+  const imageSignature = draft.canvas.images.map((img) => img.id + '|' + imageModeOf(img) + '|' + anchorKey(anchorOf(img))).join(';')
+  /** The ids the 组件锚定 preview layer has to carry (mount key: only a real change remounts). */
+  const anchorImageIds = draft.canvas.images.filter((img) => imageModeOf(img) === 'anchor').map((img) => img.id).join(',')
+
+  // Keep the real page stamped with the DRAFT's anchors while the editor is open.
+  //
+  // The engine does this for the committed document, but an image the user just anchored (or
+  // re-anchored) has to appear in the preview first: that is what makes 「锚定」 something you
+  // can see before saving — and what removes the tag from the element an image was just
+  // moved away from.
+  useEffect(() => {
+    // 组件锚定 images are painted by the overlay below, not by a rule on the anchor element:
+    // they must NOT carry the tag (an image that switched mode has to give it back).
+    const live = new Set(draft.canvas.images.filter((img) => imageModeOf(img) === 'embed').map((img) => img.id))
+    for (const node of Array.from(document.querySelectorAll('[data-dsh-myskin-embed]'))) {
+      const id = node.getAttribute('data-dsh-myskin-embed') ?? ''
+      if (!live.has(id)) node.removeAttribute('data-dsh-myskin-embed')
+    }
+    for (const img of draft.canvas.images) {
+      if (imageModeOf(img) !== 'embed') continue
+      // A 整组 image belongs on EVERY member of its block (and on the members created later —
+      // the block is a selector, so a new row is tagged on the next pass).
+      const targets = resolveImageTargets(img, document)
+      for (const node of Array.from(document.querySelectorAll('[data-dsh-myskin-embed="' + img.id + '"]'))) {
+        if (!targets.includes(node)) node.removeAttribute('data-dsh-myskin-embed')
+      }
+      for (const target of targets) {
+        if (target.getAttribute('data-dsh-myskin-embed') !== img.id) target.setAttribute('data-dsh-myskin-embed', img.id)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imageSignature])
+
+  // 组件锚定 in the preview: the very layer the engine will mount, fed from the live draft.
+  // The editor cannot preview these with CSS — being painted outside the component is the
+  // point — so the same code runs here, and what the user drags is what saving produces.
+  const overlayRef = useRef<ImageOverlay | undefined>(undefined)
+  useEffect(() => {
+    if (anchorImageIds === '') return
+    const overlay = mountImageOverlay(
+      () => draftRef.current.canvas.images.filter((img) => imageModeOf(img) === 'anchor'),
+      document,
+    )
+    overlayRef.current = overlay
+    return () => { overlay.dispose(); overlayRef.current = undefined }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchorImageIds])
+  // Numbers change every frame of a drag; the overlay reads them rather than the DOM.
+  useEffect(() => { overlayRef.current?.sync() })
+
+  // The draft has to WIN while the editor is open. `applySkin` appends a NEW stylesheet on
+  // every accepted settings change, and identical selectors are resolved by document order
+  // — after the first 保存 the committed (old) rule sat behind the draft's and pinned the
+  // element to its previous coordinates on every drag frame. Re-appending only happens when
+  // something actually lands behind the draft's tag, so this costs nothing per frame.
+  useEffect(() => {
+    const observer = new MutationObserver(() => { keepStylesheetLast(liveStyleRef.current) })
+    observer.observe(document.head, { childList: true })
+    keepStylesheetLast(liveStyleRef.current)
+    return () => { observer.disconnect() }
+  }, [])
+
+  // Remove the live style tag, every live text patch, and the draft's embed tags on unmount.
   useEffect(() => () => {
     if (liveStyleRef.current !== null) { liveStyleRef.current.remove(); liveStyleRef.current = null }
     restoreLiveText()
+    // The editor tagged the page for the DRAFT — including images the user is now discarding.
+    // Closing (✕/Esc) or saving both end here, so the committed document gets the page back:
+    // its own images are re-resolved and re-tagged, every other tag is taken off.
+    const committed = new Set(committedImagesRef.current.map((img) => img.id))
+    for (const node of Array.from(document.querySelectorAll('[data-dsh-myskin-embed]'))) {
+      const id = node.getAttribute('data-dsh-myskin-embed') ?? ''
+      if (!committed.has(id)) node.removeAttribute('data-dsh-myskin-embed')
+    }
+    for (const img of committedImagesRef.current) {
+      const target = resolveImageAnchor(img, document)
+      if (target !== undefined && target.getAttribute('data-dsh-myskin-embed') !== img.id) target.setAttribute('data-dsh-myskin-embed', img.id)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -901,18 +1128,34 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
   }
   const liveApplyRef = useRef(false)
   const liveTransformRef = useRef(false)
+  /**
+   * Whether the Inspector's X/Y/scale fields own the transform right now.
+   *
+   * Set by the panel's own inputs, cleared by a grip gesture and by every mirror update,
+   * so a value the panel merely DISPLAYS can never be written back a frame late.
+   */
+  const transformAuthoredRef = useRef(false)
+  /** True while the current run of edits on a whole-app font role owns one undo entry. */
+  const roleEditRef = useRef(false)
   const liveApply = (selector: string, declaration: string): void => {
     if (!liveApplyRef.current) { snapshot(); liveApplyRef.current = true }
     // Only the properties the Inspector owns are rewritten; a hidden element (or a
     // hand-written geek rule) keeps its other declarations. Replacing the whole rule
     // here is what used to make a hidden element reappear on the next style tweak.
-    const existing = draft.css.find((r) => r.selector === selector)?.rule
-    const merged = withManagedDeclarations(existing, declaration)
-    // Nothing actually changed (selecting an element with a saved rule re-emits the same
-    // values): stay out of the way instead of dirtying the draft and pushing an undo step.
-    if (sameDeclarations(existing, merged)) return
-    const rest = draft.css.filter((r) => r.selector !== selector)
-    setDraft({ ...draft, css: merged === '' ? rest : [...rest, { selector, rule: merged }] })
+    //
+    // The draft comes from React's own pending state, never from this render's closure:
+    // several writers touch the same rule (canvas gestures, text, the Inspector) and a
+    // stale base silently reverted whatever the others had just written — the second half
+    // of the drag twitch.
+    setDraft((prev) => {
+      const existing = prev.css.find((r) => r.selector === selector)?.rule
+      const merged = withManagedDeclarations(existing, declaration)
+      // Nothing actually changed (selecting an element with a saved rule re-emits the same
+      // values): stay out of the way instead of dirtying the draft and pushing an undo step.
+      if (sameDeclarations(existing, merged)) return prev
+      const rest = prev.css.filter((r) => r.selector !== selector)
+      return merged === '' ? { ...prev, css: rest } : { ...prev, css: [...rest, { selector, rule: merged }] }
+    })
   }
   /**
    * Set or drop ONE declaration on an element's rule.
@@ -937,9 +1180,47 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
   /** Undo {@link hideElement}. */
   const unhideElement = (selector: string): void => { setElementProperty(selector, HIDE_PAIR[0], undefined) }
   /** Remove a control and reclaim its slot (display: none). */
-  const removeControl = (selector: string): void => { setElementProperty(selector, REMOVE_PAIR[0], REMOVE_PAIR[1]) }
-  /** Undo {@link removeControl}. */
-  const restoreControl = (selector: string): void => { setElementProperty(selector, REMOVE_PAIR[0], undefined) }
+  const removeControl = (selector: string): void => {
+    // Removing it again also takes it out of the bin's "make it visible" overrides.
+    setRestoredLive((prev) => {
+      if (prev[selector] === undefined) return prev
+      const next = { ...prev }
+      delete next[selector]
+      return next
+    })
+    setElementProperty(selector, REMOVE_PAIR[0], REMOVE_PAIR[1])
+  }
+  /**
+   * Put removed controls back (the Inspector's button AND the recycle bin).
+   *
+   * Dropping the declaration is the whole edit only while the removal has never been
+   * saved. Once it has, the COMMITTED skin still declares `display: none` under the same
+   * selector, so clearing it in the draft would change nothing on screen. The element is
+   * therefore measured while both skin stylesheets are off ({@link naturalDisplayOf}) and
+   * that value is emitted from the editor's own layer until the removal is gone from the
+   * document too — nothing about it reaches the draft.
+   * @param selectors - the entries to restore.
+   */
+  const restoreRemoved = (selectors: readonly string[]): void => {
+    if (selectors.length === 0) return
+    snapshot()
+    // Measured unconditionally rather than "only when the committed document removes it":
+    // the document can change under the editor (a 保存 mid-session), and a stale answer
+    // would leave the entry looking restored in the list while the page kept it hidden.
+    // Where nothing removes it, the emitted value equals what the element already
+    // computes to, so the override is a no-op that the next 保存 drops anyway.
+    const measured: Record<string, string> = {}
+    for (const selector of selectors) {
+      const element = safeQuery(selector)
+      if (element === null) continue
+      const display = naturalDisplayOf(element)
+      if (display !== undefined) measured[selector] = display
+    }
+    if (Object.keys(measured).length > 0) setRestoredLive((prev) => ({ ...prev, ...measured }))
+    setDraft((prev) => ({ ...prev, css: selectors.reduce((list, selector) => withControlRestored(list, selector), prev.css) }))
+  }
+  /** Undo {@link removeControl} for one element (the Inspector's 恢复显示). */
+  const restoreControl = (selector: string): void => { restoreRemoved([selector]) }
   /**
    * Text the canvas has already written into the live page (node → original data).
    * The engine applies text only on commit, so without this "edit text" looked like a
@@ -991,12 +1272,18 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
    */
   const liveTransform = (selector: string, x: number, y: number, scale: number): void => {
     if (!liveTransformRef.current) { snapshot(); liveTransformRef.current = true }
-    const existing = draft.css.find((r) => r.selector === selector)?.rule
-    const value = transformValue(x, y, scale)
-    const merged = withManagedDeclarations(existing, value === '' ? '' : 'transform: ' + value)
-    if (sameDeclarations(existing, merged)) return
-    const rest = draft.css.filter((r) => r.selector !== selector)
-    setDraft({ ...draft, css: merged === '' ? rest : [...rest, { selector, rule: merged }] })
+    // `transformEdit` rewrites ONLY the transform: the previous merge dropped every
+    // managed property (width, padding, font-size…) and re-added the transform alone, so
+    // a dragged element lost them and the Inspector's preview put them back — once per
+    // frame. The draft is read from React's pending state so a gesture that spans several
+    // renders can never write its stale base over a concurrent edit.
+    setDraft((prev) => {
+      const existing = prev.css.find((r) => r.selector === selector)?.rule
+      const merged = transformEdit(existing, x, y, scale)
+      if (sameDeclarations(existing, merged)) return prev
+      const rest = prev.css.filter((r) => r.selector !== selector)
+      return merged === '' ? { ...prev, css: rest } : { ...prev, css: [...rest, { selector, rule: merged }] }
+    })
   }
   const liveText = (selector: string, before: string, after: string): void => {
     if (!liveTextRef.current) { snapshot(); liveTextRef.current = true }
@@ -1061,19 +1348,20 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
     setDraft({ ...draft, css: draft.css.filter((r) => !(r.selector === FONT_FACE_SELECTOR && r.rule.includes("'" + family + "'"))) })
   }
   /**
-   * Apply one family to the whole page.
+   * Set (or clear) one whole-app font role: 界面 / 正文 / 代码.
    *
-   * `body` cannot be picked in the canvas (the picker skips the document roots), so a
-   * site-wide font needs its own door: this writes a `body` rule with the same family.
-   * @param family - the family stack to set.
+   * One history entry per editing session instead of per keystroke, like every other field in
+   * this panel: the first change of a session snapshots, the rest only update the draft.
+   *
+   * The write goes through {@link withRoleFont}, which merges by PROPERTY — 界面 and 代码 share
+   * the `:root` entry (and so does the background-strength marker), so replacing the entry
+   * would silently wipe whichever role was set first.
+   * @param role - which role to write.
+   * @param value - the family stack, or `''` to clear the role.
    */
-  const fontToPage = (family: string): void => {
-    if (family.trim() === '') return
-    snapshot()
-    const existing = draft.css.find((r) => r.selector === 'body')?.rule
-    const merged = mergeDeclaration(existing, 'font-family: ' + family.trim() + ' !important')
-    const rest = draft.css.filter((r) => r.selector !== 'body')
-    setDraft({ ...draft, css: [...rest, { selector: 'body', rule: merged }] })
+  const setRoleFont = (role: FontRole, value: string): void => {
+    if (!roleEditRef.current) { snapshot(); roleEditRef.current = true }
+    setDraft((prev) => ({ ...prev, css: withRoleFont(prev.css, role, value) }))
   }
 
   const onEmbedBgFile = (e: React.ChangeEvent<HTMLInputElement>): void => {
@@ -1090,7 +1378,19 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
       snapshot()
       const id = 'embed-' + Date.now() + '-' + Math.floor(Math.random() * 1000)
       target.setAttribute('data-dsh-myskin-embed', id)
-      const img: EmbeddedImage = { id, selector: '[data-dsh-myskin-embed="' + id + '"]', fallbackSelector: selectorOf(target), url, x: 0, y: 0, w: 320, h: 200, opacity: 0.9, pageKey: currentSettingsPageKey(target.ownerDocument) }
+      const img: EmbeddedImage = {
+        id,
+        selector: '[data-dsh-myskin-embed="' + id + '"]',
+        fallbackSelector: selectorOf(target),
+        // A brand-new image is anchored to the element the user embedded it on — or, when the
+        // panel is in 整组 scope, to the whole block: one picture on every workspace row, now and
+        // for the rows created later. The anchor panel can re-point it either way afterwards.
+        anchor: scope === 'group' && group !== undefined
+          ? { kind: 'group', value: group.selector, label: t(groupLabelKey(group.kind)) }
+          : anchorFromElement(target),
+        url, x: 0, y: 0, w: 320, h: 200, opacity: 0.9,
+        pageKey: currentSettingsPageKey(target.ownerDocument),
+      }
       setDraft({ ...draft, canvas: { ...draft.canvas, images: [...draft.canvas.images, img] } })
     })
   }
@@ -1140,7 +1440,12 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
     if (el === undefined) return
     e.preventDefault()
     e.stopPropagation()
-    const selector = selectorOf(el)
+    // The grip is the writer for the rest of this gesture: the panel's fields become a
+    // pure readout, so their (one render older) numbers can never be echoed back.
+    transformAuthoredRef.current = false
+    // A drag follows the panel's scope: in 整组 the whole block moves together, exactly like
+    // typing a number into the X field would.
+    const selector = activeSelector !== '' ? activeSelector : selectorOf(el)
     const base = parseTransform(draft.css.find((r) => r.selector === selector)?.rule)
     const rect = el.getBoundingClientRect()
     const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
@@ -1223,7 +1528,7 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
     }
   }
 
-  const resetDraft = (): void => { snapshot(); setDraft(parseSkin(EMPTY_SKIN)); setSelected(undefined); restoreLiveText() }
+  const resetDraft = (): void => { snapshot(); setDraft(parseSkin(EMPTY_SKIN)); setSelected(undefined); setRestoredLive({}); restoreLiveText() }
   /**
    * 保存: write the draft into the skin document and KEEP editing.
    *
@@ -1237,8 +1542,16 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
     setFlash(undefined)
     setSave({ state: 'saving' })
     void onSave({ ...draft }).then((report) => {
-      if (report.ok) { setSave({ state: 'saved' }); setFlash(t('savedHint')); return }
-      const detail = saveFailureText(report, t)
+      // The document now says the same thing as the draft: the transient "make it visible
+      // again" overrides for restored controls have done their job.
+      if (report.ok) {
+        committedImagesRef.current = draft.canvas.images
+        setRestoredLive({})
+        setSave({ state: 'saved' })
+        setFlash(t('savedHint'))
+        return
+      }
+      const detail = saveFailureText(report, t, draft.canvas)
       setSave({ state: 'failed', detail })
       setHint(detail)
     })
@@ -1248,35 +1561,27 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
     setFlash(undefined)
     setSave({ state: 'saving' })
     void onCommit({ ...draft, enabled: true }).then((report) => {
-      if (report.ok) { setSave({ state: 'saved' }); return }
-      const detail = saveFailureText(report, t)
+      if (report.ok) { committedImagesRef.current = draft.canvas.images; setRestoredLive({}); setSave({ state: 'saved' }); return }
+      const detail = saveFailureText(report, t, draft.canvas)
       setSave({ state: 'failed', detail })
       setHint(detail)
     })
   }
   /**
-   * Close the editor, persisting unsaved edits first.
+   * Close the editor and DISCARD everything that was not written.
    *
-   * Closing used to discard the draft silently, which reads as "saving does not
-   * work": the user edits, closes, and the page is unchanged. A failed write keeps
-   * the editor open with the reason instead of losing the work.
+   * This used to save first ("✕ means keep"), which quietly wrote a half-finished draft into
+   * the skin document — the opposite of what a close button is for, and a nasty surprise when
+   * the draft was an experiment. 保存 and 应用 are the explicit commit doors; ✕ (and Esc) now
+   * mean "leave, change nothing", and every live edit is reverted on unmount.
    */
-  const onCloseOrSave = (): void => {
-    if (save.state !== 'dirty') { onClose(); return }
-    setSave({ state: 'saving' })
-    void onCommit({ ...draft }).then((report) => {
-      if (report.ok) { onClose(); return }
-      const detail = saveFailureText(report, t)
-      setSave({ state: 'failed', detail })
-      setHint(detail)
-    })
-  }
+  const closeDiscarding = (): void => { onClose() }
 
   // Latest selection / close action for the document-level key handler. The handler is
   // registered once (a capture-phase listener re-added on every keystroke is pointless
   // churn); the refs are what keep it from acting on a stale selection or draft.
   useEffect(() => { selectedRef.current = selected }, [selected])
-  useEffect(() => { closeRef.current = onCloseOrSave })
+  useEffect(() => { closeRef.current = closeDiscarding })
 
   /** Select the nearest selectable ancestor of the current selection (父级 / Alt+↑). */
   const selectParent = (): void => {
@@ -1356,7 +1661,7 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
         // An upstream dialog owns Escape while it is open: let it close first.
         if (document.querySelector('[data-shortcut-modal], [aria-modal="true"]') !== null) return
         e.preventDefault()
-        // First Escape drops the selection, the second one leaves the editor (saving).
+        // First Escape drops the selection, the second one leaves the editor (discarding).
         if (selectedRef.current !== undefined) { setSelected(undefined); return }
         closeRef.current()
       }
@@ -1376,13 +1681,23 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
       strengthTimer.current = undefined
       void onPersistStrength(canvas, css).then((report) => {
         if (report.ok) { setSave({ state: 'saved' }); return }
-        const detail = saveFailureText(report, t)
+        const detail = saveFailureText(report, t, canvas)
         setSave({ state: 'failed', detail })
         setHint(detail)
       })
     }, 400)
   }
 
+  /**
+   * The other members of the block being edited.
+   *
+   * 整组 has to be VISIBLE on the page, not just a segmented control in the panel: every other
+   * member gets an outline, so "this edit covers these" is something the user can see before
+   * changing anything.
+   */
+  const groupPeers = scope === 'group' && group !== undefined
+    ? Array.from(document.querySelectorAll(group.selector)).filter((el) => el !== selected && el.isConnected)
+    : []
   const selRect = selected !== undefined && selected.isConnected ? selected.getBoundingClientRect() : null
   // The dashed hover outline is skipped while the pointer is on the selection itself
   // (the solid box is already there) and dies with a node React replaced.
@@ -1429,7 +1744,7 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
           ) : (
             <Button style={btnBase} size="sm" variant="ghost" icon={<IconTrash size={14} />} onClick={() => { setConfirmReset(true) }} title={t('resetHint')}>{t('reset')}</Button>
           )}
-          <Button style={btnBase} size="sm" variant="ghost" icon={<IconClose size={16} />} onClick={onCloseOrSave} title={t('closeHint')}>{t('close')}</Button>
+          <Button style={btnBase} size="sm" variant="ghost" icon={<IconClose size={16} />} onClick={closeDiscarding} title={t('closeHint')}>{t('close')}</Button>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px 6px var(--dsh-myskin-leading, 16px)', fontSize: 12, lineHeight: '18px', color: hint !== undefined ? tok.warn : flash !== undefined ? tok.success : tok.labelTertiary }}>
           <span key={hint ?? flash ?? 'idle'} className={hint !== undefined || flash !== undefined ? 'dsh-myskin-warn' : undefined} style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{hint ?? flash ?? (mode === 'edit' ? t('editHint') : t('interactHint'))}</span>
@@ -1467,6 +1782,8 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
                 onRemove={removeSelector}
                 onEmbedOpacity={(id, v) => updateEmbed(id, { opacity: clampNum(v, 0, 1) })}
                 onEmbedBlend={(id, v) => updateEmbed(id, { blend: v })}
+                onEmbedAnchor={(id, anchor) => { updateEmbed(id, { anchor }) }}
+                onEmbedMode={(id, mode) => { updateEmbed(id, { mode }) }}
                 onRemoveEmbed={removeEmbed}
                 onHide={hideElement}
                 onUnhide={unhideElement}
@@ -1476,7 +1793,17 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
                 onSelectChild={selectChild}
                 onEmbedFont={embedFont}
                 onRemoveFont={removeFont}
-                onFontToPage={fontToPage}
+                activeSelector={activeSelector}
+                group={group}
+                scope={scope}
+                onScope={changeScope}
+                gapSelector={gapSelector}
+                gap={gap}
+                onGap={setGap}
+                onGapEnd={() => { gapEditRef.current = false }}
+                onRoleFont={setRoleFont}
+                onRoleFontEnd={() => { roleEditRef.current = false }}
+                transformAuthored={transformAuthoredRef}
                 t={t}
               />
             ) : (
@@ -1493,6 +1820,14 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
           ) : (
             <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{t('interactHint')}</span>
           )}
+        {mode === 'edit' ? (
+          <RecycleBin
+            entries={removedControls(draft.css)}
+            onRestore={(selector) => { restoreRemoved([selector]) }}
+            onRestoreAll={() => { restoreRemoved(removedControls(draft.css).map((entry) => entry.selector)) }}
+            t={t}
+          />
+        ) : null}
         {mode === 'edit' && showTokens ? (
           <TokenPanel tokens={draft.tokens} onToggle={toggleToken} onChange={setToken} t={t} />
         ) : null}
@@ -1505,7 +1840,15 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
         <div key={'gy' + String(line.at)} data-dsh-myskin-ui="1" className="dsh-myskin-guide" style={{ position: 'fixed', left: 0, right: 0, top: line.at, height: 1, background: tok.brand, pointerEvents: 'none', zIndex: 10003 }} />
       ))}
       {mode === 'edit' && hoverRect !== null ? <ElementBox rect={hoverRect} label={elementLabel(hover as Element)} solid={false} /> : null}
-      {mode === 'edit' && selRect !== null ? <ElementBox key={'sel-' + selectionEpoch} rect={selRect} label={selected === undefined ? '' : elementLabel(selected)} solid /> : null}
+      {mode === 'edit' ? groupPeers.map((el, index) => {
+        const rect = el.getBoundingClientRect()
+        if (rect.width === 0 && rect.height === 0) return null
+        return (
+          <div key={'peer-' + String(index)} data-dsh-myskin-ui="1" className="dsh-myskin-peer"
+            style={{ position: 'fixed', left: rect.left, top: rect.top, width: rect.width, height: rect.height, border: '1px dashed ' + tok.brand, borderRadius: 4, opacity: 0.5, pointerEvents: 'none', zIndex: 10000 }} />
+        )
+      }) : null}
+      {mode === 'edit' && selRect !== null ? <ElementBox key={'sel-' + selectionEpoch} rect={selRect} label={selected === undefined ? '' : elementLabel(selected) + (scope === 'group' && group !== undefined ? ' · ' + t('scopeGroup') + ' ' + String(group.count) : '')} solid /> : null}
       {mode === 'edit' && selRect !== null ? (
         <>
           {/* Two grips only, both on corners: the element's own area stays pickable. */}
@@ -1519,7 +1862,10 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
         {FONT_SUGGESTIONS.map((family) => (<option key={family} value={family} />))}
       </datalist>
       {draft.canvas.images.map((img) => {
-        const container = document.querySelector(img.selector) as HTMLElement | null
+        // Resolved through the anchor, not the tag: a 组件锚定 image carries no tag at all. A
+        // 整组 image has several members, so the handles follow the one the user selected.
+        const imageTargets = resolveImageTargets(img, document)
+        const container = (selected !== undefined && imageTargets.includes(selected) ? selected : imageTargets[0]) ?? null
         const crect = container !== null ? container.getBoundingClientRect() : null
         if (crect === null) return null
         const zx = crect.left + (img.x || 0), zy = crect.top + (img.y || 0)
@@ -1590,6 +1936,55 @@ function Section({ title, badge, children }: { title: string; badge?: string; ch
 }
 
 /**
+ * 「回收站」: the controls the skin removes, with a way back.
+ *
+ * A removed control is `display: none`, so the canvas can no longer hit-test it — save the
+ * removal and the element could never be selected again, which is what made the removal a
+ * one-way door. The list is DERIVED from the document's rules ({@link removedControls})
+ * instead of being stored a second time, so it cannot drift out of sync with what is really
+ * removed, and it survives a reload for free. The element is still in the DOM, which is what
+ * lets an entry show the user a name instead of a selector.
+ * @param entries - one entry per removed selector.
+ * @param onRestore - restore a single entry.
+ * @param onRestoreAll - restore every entry.
+ * @param t - copy lookup.
+ */
+function RecycleBin({ entries, onRestore, onRestoreAll, t }: {
+  entries: readonly RemovedControl[]
+  onRestore: (selector: string) => void
+  onRestoreAll: () => void
+  t: (key: MySkinKey) => string
+}): ReactNode {
+  return (
+    <Section title={t('recycleBin')} badge={entries.length === 0 ? undefined : String(entries.length)}>
+      {entries.length === 0 ? (
+        <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('recycleEmpty')}</span>
+      ) : (
+        <>
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('recycleHint')}</span>
+          {entries.map((entry) => {
+            const host = safeQuery(entry.selector)
+            return (
+              <div key={entry.selector} className="dsh-myskin-field" style={{ gap: 6 }}>
+                <span title={entry.selector} style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: tok.labelSecondary }}>
+                  {host === null ? entry.selector : elementLabel(host, 30)}
+                </span>
+                <Button style={btnBase} size="sm" variant="outline" onClick={() => { onRestore(entry.selector) }}>{t('restore')}</Button>
+              </div>
+            )
+          })}
+          {entries.length > 1 ? (
+            <div style={{ display: 'flex' }}>
+              <Button style={btnBase} size="sm" variant="ghost" onClick={onRestoreAll}>{t('restoreAll')}</Button>
+            </div>
+          ) : null}
+        </>
+      )}
+    </Section>
+  )
+}
+
+/**
  * Turns wheel movement over a control into steps.
  *
  * React attaches `wheel` as a PASSIVE listener at the root, so `onWheel` + `preventDefault`
@@ -1645,6 +2040,10 @@ interface InspectorProps {
   onRemove: (selector: string) => void
   onEmbedOpacity: (id: string, v: number) => void
   onEmbedBlend: (id: string, v: BlendMode) => void
+  /** Re-point one embedded image's anchor (element / copy / catalog landmark). */
+  onEmbedAnchor: (id: string, anchor: ImageAnchor) => void
+  /** Switch one image between 组件嵌入 (inside) and 组件锚定 (outside). */
+  onEmbedMode: (id: string, mode: ImageMode) => void
   onRemoveEmbed: (id: string) => void
   onHide: (selector: string) => void
   onUnhide: (selector: string) => void
@@ -1658,12 +2057,39 @@ interface InspectorProps {
   onEmbedFont: (family: string, url: string, format: string) => void
   /** Drop one embedded font. */
   onRemoveFont: (family: string) => void
-  /** Apply one family to the whole page (a `body` rule). */
-  onFontToPage: (family: string) => void
+  /** The selector edits are written to: the element itself, or its whole block. */
+  activeSelector: string
+  /** The block the selection belongs to, when it has one. */
+  group: ElementGroup | undefined
+  /** Whether the panel edits one element or its whole block. */
+  scope: EditScope
+  /** Switch the edit scope. */
+  onScope: (scope: EditScope) => void
+  /** Selector for the space BETWEEN block members (undefined when they are not siblings). */
+  gapSelector: string | undefined
+  /** The gap currently written, as a CSS length ('' when none). */
+  gap: string
+  /** Set (or clear, with '') the gap between block members. */
+  onGap: (value: string) => void
+  /** End the current gap-editing run (the next change starts a new undo step). */
+  onGapEnd: () => void
+  /** Set (or clear, with `''`) one whole-app font role. */
+  onRoleFont: (role: FontRole, value: string) => void
+  /** Close the current role-editing run so the next write starts its own undo entry. */
+  onRoleFontEnd: () => void
+  /**
+   * Whether the X/Y/scale fields — not the element's rule — are the source of truth.
+   *
+   * Owned by the canvas because the canvas is the other writer: a grip drag must be able
+   * to take the fields out of the loop. Mirrored values are display-only, so echoing them
+   * back one frame late was what made a dragged element alternate between the new and the
+   * old coordinates.
+   */
+  transformAuthored: MutableRefObject<boolean>
   t: (key: MySkinKey) => string
 }
 
-function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText, onRemoveText, onRemove, onEmbedOpacity, onEmbedBlend, onRemoveEmbed, onHide, onUnhide, onRemoveControl, onRestoreControl, onSelectParent, onSelectChild, onEmbedFont, onRemoveFont, onFontToPage, t }: InspectorProps): ReactNode {
+function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText, onRemoveText, onRemove, onEmbedOpacity, onEmbedBlend, onEmbedAnchor, onEmbedMode, onRemoveEmbed, onHide, onUnhide, onRemoveControl, onRestoreControl, onSelectParent, onSelectChild, onEmbedFont, onRemoveFont, activeSelector, group, scope, onScope, gapSelector, gap, onGap, onGapEnd, onRoleFont, onRoleFontEnd, transformAuthored, t }: InspectorProps): ReactNode {
   const [fontSize, setFontSize] = useState('')
   const [color, setColor] = useState('')
   const [bg, setBg] = useState('')
@@ -1687,6 +2113,14 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
   /** Font feedback: text plus whether it is a success or a warning. */
   const [fontIssue, setFontIssue] = useState<{ text: string; kind: 'ok' | 'warn' } | undefined>(undefined)
   const fontRef = useRef<HTMLInputElement | null>(null)
+  /** This machine's fonts, once the user asked for them (undefined = list closed). */
+  const [fontScan, setFontScan] = useState<FontScan | undefined>(undefined)
+  const [fontQuery, setFontQuery] = useState('')
+  const [fontBusy, setFontBusy] = useState(false)
+  /** Which list is on screen, said out loud (the machine's, or what a probe could prove). */
+  const [fontNote, setFontNote] = useState<string | undefined>(undefined)
+  /** What the local-font list writes into: the selected element, or one whole-app role. */
+  const [fontTarget, setFontTarget] = useState<'element' | FontRole>('element')
   /** X/Y move + uniform scale of the selection ('' = untouched axis). */
   const [transX, setTransX] = useState('')
   const [transY, setTransY] = useState('')
@@ -1703,8 +2137,10 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
   const [geekCss, setGeekCss] = useState('')
   const [geekSel, setGeekSel] = useState('')
   useEffect(() => {
-    setGeekSel(selectorOf(target))
-  }, [target])
+    // Geek mode starts from whatever the panel is editing: the element, or its whole block.
+    setGeekSel(activeSelector !== '' ? activeSelector : selectorOf(target))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, activeSelector])
   const applyGeek = (): void => {
     // Geek mode is the escape hatch: the user wrote the whole rule, so it REPLACES the
     // element's rule instead of merging into it the way the style fields do.
@@ -1734,6 +2170,8 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
   }
 
   useEffect(() => {
+    // A freshly selected element is owned by its own rule, not by the fields.
+    transformAuthored.current = false
     const sel = selectorOf(target)
     const rule = draft.css.find((r) => r.selector === sel)?.rule
     if (rule !== undefined && rule.trim() !== '') {
@@ -1858,6 +2296,7 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
    * @param big - Shift was held.
    */
   const nudge = (field: 'transX' | 'transY' | 'scale', direction: 1 | -1, big: boolean): void => {
+    transformAuthored.current = true
     if (field === 'scale') {
       setScale(String(stepValue(toNum(scale, 1), direction, big ? 0.25 : 0.05, 0.2, 3)))
       touch('scale')
@@ -1879,6 +2318,52 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
       onClick={(e) => { e.preventDefault(); e.stopPropagation(); onClick() }}>↺</button>
   )
 
+  /**
+   * Read this machine's installed fonts and show them as a list.
+   *
+   * Chromium's Local Font Access API is the only way to enumerate them, and it needs a user
+   * gesture plus a permission grant — which is why this runs from the button and nothing
+   * else. Without the API (or without the grant) the list degrades to the candidate
+   * families a text-metric probe can actually prove are installed, and the header says
+   * which of the two is on screen instead of pretending they are the same thing.
+   */
+  const loadLocalFonts = (): void => {
+    if (fontBusy) return
+    setFontBusy(true)
+    void scanFonts(document, window).then((scan) => {
+      setFontBusy(false)
+      setFontScan(scan)
+      setFontQuery('')
+      if (scan.source === 'local') {
+        setFontNote(t('fontLocalCount') + ' · ' + String(scan.families.length))
+        return
+      }
+      const reason = scan.denied === true ? t('fontDenied') : t('fontProbeCount')
+      setFontNote(reason + ' · ' + String(scan.families.length))
+    }).catch(() => {
+      // scanFonts already degrades on its own; a rejected promise here would be a bug,
+      // and the panel still must not look frozen.
+      setFontBusy(false)
+      setFontScan({ source: 'detected', families: [] })
+      setFontNote(t('fontProbeCount') + ' · 0')
+    })
+  }
+  /**
+   * Send a family picked from the local-font list to whatever the list is aimed at.
+   *
+   * One list, four targets (the selected element and the three whole-app roles). A role is a
+   * portable setting — it gets exported and imported elsewhere — so it stores the family plus
+   * a generic fallback of the right KIND; the element field keeps the plain family it always
+   * wrote.
+   * @param family - the family name, unquoted.
+   */
+  const applyPickedFamily = (family: string): void => {
+    const quoted = quoteFamily(family)
+    if (fontTarget === 'element') { setFontFamily(quoted); touch('fontFamily'); return }
+    onRoleFontEnd()
+    onRoleFont(fontTarget, roleStackFor(quoted, fontTarget))
+    setFontIssue({ text: t('roleApplied') + ' · ' + t(roleLabelKey(fontTarget)), kind: 'ok' })
+  }
   /**
    * Read one font file and register it as an `@font-face` entry.
    * @param e - the hidden file input's change event.
@@ -1930,16 +2415,66 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
       style={{ width: 28, height: 24, border: '1px solid ' + tok.borderL2, borderRadius: 4, background: tok.bgBase, padding: 0, cursor: 'pointer' }} />
   )
 
+  /**
+   * What the panel edits.
+   *
+   * Not necessarily the selected element: in 整组 scope it is the block's selector, which is what
+   * makes one edit cover every workspace — including the ones created later. Text replacement
+   * deliberately keeps using the element's own selector (each row has its own name).
+   */
+  const sel = activeSelector !== '' ? activeSelector : selectorOf(target)
+  const rule = draft.css.find((r) => r.selector === sel)?.rule
+  /** The rows the open font list shows for the current search (empty when it is closed). */
+  const fontFamilies = fontScan === undefined ? [] : filterFamilies(fontScan.families, fontQuery)
+  /**
+   * The first family of whatever the font list is aimed at, lower-cased.
+   *
+   * The list highlights the row that is already in use — which is the role's stack while a role
+   * is being edited, and the element's own family otherwise.
+   */
+  const activeFontFamily = (fontTarget === 'element' ? fontFamily : roleFont(draft.css, fontTarget))
+    .split(',')[0].trim().replace(/^"|"$/g, '').toLowerCase()
+  /**
+   * The 整组 anchor offered in the image anchor picker, when the selection belongs to a block.
+   *
+   * Absent means "no block here", which greys the option out instead of writing a selector that
+   * matches a single element and quietly behaves like 仅此元素.
+   */
+  const groupAnchor: ImageAnchor | undefined = group === undefined
+    ? undefined
+    : { kind: 'group', value: group.selector, label: t(groupLabelKey(group.kind)) }
+  /** Every embedded image's anchor, as one string (what "these images follow these things" means). */
+  const anchorSignature = draft.canvas.images.map((img) => img.id + '|' + anchorKey(anchorOf(img))).join(';')
+  /**
+   * Whether each image's anchor resolves on the page right now.
+   *
+   * Computed per anchor change instead of per render: a text anchor scans the DOM, and this
+   * panel re-renders on every frame of an image drag. The hint it feeds is the difference
+   * between "my picture disappeared" and "nothing on this page carries that copy".
+   */
+  const anchorResolves = useMemo(() => {
+    const out = new Map<string, boolean>()
+    for (const img of draft.canvas.images) out.set(img.id, resolveImageAnchor(img, document) !== undefined)
+    return out
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchorSignature, target])
+  const hidden = rule !== undefined && /visibility\s*:\s*hidden/.test(rule)
+  const removed = rule !== undefined && /display\s*:\s*none/.test(rule)
+
   // Real-time preview: apply the combined declaration whenever a field value,
   // the interaction state, or the touched set changes (runs after React settles).
   // X/Y move + scale as one `transform` declaration (identity parts are omitted, an
   // all-identity transform clears the property instead of pinning `transform: none`).
-  // Deliberately NOT gated on `touched`: a canvas grip writes the rule without the fields
-  // being typed into, and the panel mirrors the values back — so whatever the fields hold
-  // IS what the element should render. Empty/identity means "no transform of ours", which
-  // also clears a previous one instead of pinning `transform: none`.
+  //
+  // The transform enters this preview from the FIELDS only while the panel authored it.
+  // The fields are otherwise a mirror of the element's rule — a canvas grip wrote it — and
+  // echoing a mirrored value back one render late is exactly what made a dragged element
+  // alternate between its new and its old coordinates. When the panel does not own the
+  // transform, the rule's own declaration is re-emitted verbatim: the preview replaces the
+  // managed properties, so leaving it out would silently DROP a move the user just made
+  // (and reformatting it would drop a hand-written `rotate()` beside our offsets).
   const previewTransform = transformValue(toNum(transX, 0), toNum(transY, 0), toNum(scale, 1))
-  const transformDecl = previewTransform === '' ? '' : 'transform: ' + previewTransform + ' !important'
+  const transformDecl = transformPreview(rule, { x: toNum(transX, 0), y: toNum(transY, 0), scale: toNum(scale, 1) }, transformAuthored.current)
   useEffect(() => {
     const decl = [
       used('fontSize') ? 'font-size: ' + fontSize + ' !important' : '',
@@ -1964,15 +2499,18 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
     // Called even when the declaration set is empty: that is how "the last field was
     // cleared" reaches the page. The engine treats an unchanged rule as a no-op, so a
     // mere selection never marks the draft dirty.
-    onSample(selectorOf(target), decl)
+    onSample(sel, decl)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fontSize, fontFamily, color, bg, bgImage, weight, radius, borderColor, borderWidth, padding, width, height, margin, lineHeight, opacity, shadow, textAlign, transX, transY, scale, touched])
 
   // A canvas grip drag writes the rule directly, so the panel mirrors it back — except
-  // while one of these inputs has focus (that would rewrite the field mid-typing).
+  // while one of these inputs has focus (that would rewrite the field mid-typing). The
+  // mirror hands the transform back to the rule: from here on the fields DISPLAY it, and
+  // only a fresh edit in one of them makes the panel the writer again.
   useEffect(() => {
     if (transformFocusRef.current) return
-    const current = parseTransform(draft.css.find((r) => r.selector === selectorOf(target))?.rule)
+    transformAuthored.current = false
+    const current = parseTransform(draft.css.find((r) => r.selector === sel)?.rule)
     setTransX(current.x === 0 ? '' : String(current.x))
     setTransY(current.y === 0 ? '' : String(current.y))
     setScale(current.scale === 1 ? '' : String(current.scale))
@@ -1993,15 +2531,12 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
     onText(selectorOf(host), beforeRef.current, desired)
     setTextIssue(t('textApplied'))
   }
-  const sel = selectorOf(target)
-  const rule = draft.css.find((r) => r.selector === sel)?.rule
-  const hidden = rule !== undefined && /visibility\s*:\s*hidden/.test(rule)
-  const removed = rule !== undefined && /display\s*:\s*none/.test(rule)
-
   const fieldLabel: CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, fontSize: 12, lineHeight: '20px', width: '100%' }
 
   const style: CSSProperties = {
-    position: 'relative', zIndex: 5, width: '100%', overflow: 'auto',
+    // `flex: none`: the panel is the scroller. Letting the Inspector shrink instead squeezes
+    // its own content (and, at the limit, everything below it) into slivers.
+    position: 'relative', zIndex: 5, width: '100%', flex: 'none', overflow: 'auto',
     display: 'flex', flexDirection: 'column', gap: 10, color: tok.labelPrimary,
   }
 
@@ -2016,7 +2551,35 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
           <Button style={btnBase} size="sm" variant="ghost" onClick={onSelectChild} title={t('selectChildHint')}>↓ {t('selectChild')}</Button>
         </div>
         <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelPrimary, wordBreak: 'break-word' }}>{elementLabel(target, 48)}</span>
-        <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary, fontFamily: 'var(--ds-font-family-code, monospace)', wordBreak: 'break-all' }}>{selectorOf(target)}</span>
+        {/* 编辑范围：单元素 / 整组（同类元素，含之后新建的） */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{t('editScope')}</span>
+          <span style={{ display: 'inline-flex', border: '1px solid ' + tok.borderL2, borderRadius: 8, overflow: 'hidden' }}>
+            <Button size="sm" variant={scope === 'single' ? 'primary' : 'ghost'} onClick={() => { onScope('single') }}>{t('scopeSingle')}</Button>
+            <Button size="sm" variant={scope === 'group' ? 'primary' : 'ghost'} disabled={group === undefined}
+              title={group === undefined ? t('scopeUnavailable') : t('scopeGroupHint')}
+              onClick={() => { onScope('group') }}>
+              {group === undefined ? t('scopeGroup') : t('scopeGroup') + ' · ' + t(groupLabelKey(group.kind)) + ' ' + String(group.count)}
+            </Button>
+          </span>
+        </div>
+        {/* 整组：成员之间的间隔（用相邻兄弟选择器，只动彼此之间，不碰首元素与容器顶） */}
+        {scope === 'group' ? (
+          gapSelector === undefined ? (
+            <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('gapUnavailable')}</span>
+          ) : (
+            <Field label={t('gap')} clearTitle={t('gapClear')} clearable={gap.trim() !== ''} onClear={() => { onGap(''); onGapEnd() }}>
+              <WheelNudge onStep={(direction, big) => { onGap(gapLength(String(stepValue(toNum(gap, 0), direction, big ? 10 : 1)))) }}>
+                <Input value={gap.replace(/px$/i, '')} placeholder="0" title={t('gapHint')}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => { onGap(gapLength(e.target.value)) }}
+                  onBlur={onGapEnd} />
+              </WheelNudge>
+              <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>px</span>
+            </Field>
+          )
+        ) : null}
+        <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('scopeWrites')}</span>
+        <span style={{ fontSize: 11, lineHeight: '16px', color: scope === 'group' ? tok.brand : tok.labelTertiary, fontFamily: 'var(--ds-font-family-code, monospace)', wordBreak: 'break-all' }}>{sel}</span>
         {target.matches(COMPOSER_PLACEHOLDER_SELECTOR) ? (
           <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('placeholderTarget')}</span>
         ) : null}
@@ -2049,11 +2612,55 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
           <Input list="dsh-myskin-font-list" value={fontFamily} placeholder={computedFont} onChange={(e: ChangeEvent<HTMLInputElement>) => { setFontFamily(e.target.value); touch('fontFamily') }} />
         </Field>
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
+          <Button style={btnBase} size="sm" variant="ghost" onClick={loadLocalFonts} disabled={fontBusy} title={t('fontListHint')}>{fontBusy ? t('fontListing') : t('fontList')}</Button>
           <Button style={btnBase} size="sm" variant="ghost" onClick={() => { fontRef.current?.click() }} title={t('embedFontHint')}>{t('embedFont')}</Button>
-          <Button style={btnBase} size="sm" variant="ghost" disabled={fontFamily.trim() === ''} onClick={() => { onFontToPage(fontFamily.trim()) }} title={t('fontToPageHint')}>{t('fontToPage')}</Button>
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('fontTargetNote')}{fontTarget === 'element' ? t('fieldFont') : t(roleLabelKey(fontTarget))}</span>
           <span style={{ flex: '1 1 120px', minWidth: 0, fontSize: 11, lineHeight: '16px', color: fontIssue === undefined ? tok.labelTertiary : fontIssue.kind === 'ok' ? tok.success : tok.warn }}>{fontIssue?.text ?? t('fontHint')}</span>
         </div>
         <input ref={fontRef} type="file" accept=".woff2,.woff,.ttf,.otf" style={{ display: 'none' }} onChange={onPickFont} />
+        {/* 整站字体：界面 / 正文 / 代码。三者各自独立可清除，写的都是皮肤文档里的普通 css 条目。 */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 6, borderTop: '1px solid ' + tok.borderL2 }}>
+          <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>{t('fontRoles')}</span>
+          {FONT_ROLES.map((role) => {
+            const value = roleFont(draft.css, role)
+            return (
+              <Field key={role} label={t(roleLabelKey(role))} clearTitle={t('clearField')} clearable={value !== ''} onClear={() => { onRoleFont(role, '') }}>
+                <Input value={value} placeholder={t('roleUnset')} title={t('fontRolesHint')}
+                  onFocus={() => { setFontTarget(role) }}
+                  onBlur={onRoleFontEnd}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => { onRoleFont(role, e.target.value) }} />
+                <Button style={btnBase} size="sm" variant="ghost" title={t('rolePickHint')}
+                  onClick={() => { setFontTarget(role); if (fontScan === undefined) loadLocalFonts() }}>{t('rolePick')}</Button>
+              </Field>
+            )
+          })}
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('fontRolesHint')}</span>
+        </div>
+        {fontScan === undefined ? null : (
+          <div className="dsh-myskin-card" style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 11, lineHeight: '16px', color: fontScan.source === 'local' ? tok.success : tok.warn }}>{fontNote}</span>
+              <button type="button" className="dsh-myskin-iconbtn" title={t('close')} onClick={() => { setFontScan(undefined) }}>×</button>
+            </div>
+            <Input value={fontQuery} placeholder={t('fontSearch')} onChange={(e: ChangeEvent<HTMLInputElement>) => { setFontQuery(e.target.value) }} />
+            {fontQuery.trim() === '' ? null : (
+              <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{String(fontFamilies.length)} / {String(fontScan.families.length)}</span>
+            )}
+            {/* A block scroller with a FIXED height: as a flex column, 200+ rows were flex
+                items that shrank to their padding floor (and `overflow: hidden` then clipped
+                every line away) — the list rendered as an empty box with two scrollbars. */}
+            <div className="dsh-myskin-scroll" style={{ display: 'block', flex: 'none', height: 156, overflowY: 'auto', overflowX: 'hidden' }}>
+              {fontFamilies.length === 0 ? (
+                <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('fontListEmpty')}</span>
+              ) : fontFamilies.map((family) => (
+                <button key={family} type="button" className="dsh-myskin-fontpick"
+                  data-active={activeFontFamily === family.toLowerCase() ? '1' : undefined}
+                  title={family} style={{ fontFamily: quoteFamily(family) }}
+                  onClick={() => { applyPickedFamily(family) }}>{family}</button>
+              ))}
+            </div>
+          </div>
+        )}
         {embeddedFonts.length === 0 ? null : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {embeddedFonts.map((font) => (
@@ -2120,33 +2727,36 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
       <Section title={t('groupTransform')} badge={previewTransform === '' ? undefined : t('customBadge')}>
         <Field label={t('fieldTransX')} clearTitle={t('clearField')} clearable={false} onClear={() => undefined}>
           <WheelNudge onStep={(direction, big) => { nudge('transX', direction, big) }}>
-            <Input value={transX} placeholder="0" title={t('wheelHint')} onChange={(e: ChangeEvent<HTMLInputElement>) => { setTransX(e.target.value); touch('transX') }} onFocus={() => { transformFocusRef.current = true }} onBlur={() => { transformFocusRef.current = false }} />
+            <Input value={transX} placeholder="0" title={t('wheelHint')} onChange={(e: ChangeEvent<HTMLInputElement>) => { transformAuthored.current = true; setTransX(e.target.value); touch('transX') }} onFocus={() => { transformFocusRef.current = true }} onBlur={() => { transformFocusRef.current = false }} />
           </WheelNudge>
-          {resetButton(t('resetAxisX'), transX.trim() === '', () => { clearField('transX', () => { setTransX('') }) })}
+          {resetButton(t('resetAxisX'), transX.trim() === '', () => { transformAuthored.current = true; clearField('transX', () => { setTransX('') }) })}
         </Field>
         <Field label={t('fieldTransY')} clearTitle={t('clearField')} clearable={false} onClear={() => undefined}>
           <WheelNudge onStep={(direction, big) => { nudge('transY', direction, big) }}>
-            <Input value={transY} placeholder="0" title={t('wheelHint')} onChange={(e: ChangeEvent<HTMLInputElement>) => { setTransY(e.target.value); touch('transY') }} onFocus={() => { transformFocusRef.current = true }} onBlur={() => { transformFocusRef.current = false }} />
+            <Input value={transY} placeholder="0" title={t('wheelHint')} onChange={(e: ChangeEvent<HTMLInputElement>) => { transformAuthored.current = true; setTransY(e.target.value); touch('transY') }} onFocus={() => { transformFocusRef.current = true }} onBlur={() => { transformFocusRef.current = false }} />
           </WheelNudge>
-          {resetButton(t('resetAxisY'), transY.trim() === '', () => { clearField('transY', () => { setTransY('') }) })}
+          {resetButton(t('resetAxisY'), transY.trim() === '', () => { transformAuthored.current = true; clearField('transY', () => { setTransY('') }) })}
         </Field>
         <Field label={t('fieldScale')} clearTitle={t('clearField')} clearable={false} onClear={() => undefined}>
           <WheelNudge onStep={(direction, big) => { nudge('scale', direction, big) }}>
-            <Input value={scale} placeholder="1" title={t('wheelHintScale')} onChange={(e: ChangeEvent<HTMLInputElement>) => { setScale(e.target.value); touch('scale') }} onFocus={() => { transformFocusRef.current = true }} onBlur={() => { transformFocusRef.current = false }} />
+            <Input value={scale} placeholder="1" title={t('wheelHintScale')} onChange={(e: ChangeEvent<HTMLInputElement>) => { transformAuthored.current = true; setScale(e.target.value); touch('scale') }} onFocus={() => { transformFocusRef.current = true }} onBlur={() => { transformFocusRef.current = false }} />
           </WheelNudge>
-          {resetButton(t('resetScale'), scale.trim() === '', () => { clearField('scale', () => { setScale('') }) })}
+          {resetButton(t('resetScale'), scale.trim() === '', () => { transformAuthored.current = true; clearField('scale', () => { setScale('') }) })}
         </Field>
         <Field label={t('scaleSlider')} clearTitle={t('clearField')} clearable={false} onClear={() => undefined}>
-          <input type="range" min={20} max={300} step={1} value={Math.round(toNum(scale, 1) * 100)} onChange={(e) => { setScale(String(Number(e.target.value) / 100)); touch('scale') }} style={{ flex: '1 1 120px', minWidth: 120 }} />
+          <input type="range" min={20} max={300} step={1} value={Math.round(toNum(scale, 1) * 100)} onChange={(e) => { transformAuthored.current = true; setScale(String(Number(e.target.value) / 100)); touch('scale') }} style={{ flex: '1 1 120px', minWidth: 120 }} />
         </Field>
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
-          <Button style={btnBase} size="sm" variant="ghost" onClick={() => { clearField('transX', () => { setTransX('') }); clearField('transY', () => { setTransY('') }); clearField('scale', () => { setScale('') }) }}>{t('resetTransform')}</Button>
+          <Button style={btnBase} size="sm" variant="ghost" onClick={() => { transformAuthored.current = true; clearField('transX', () => { setTransX('') }); clearField('transY', () => { setTransY('') }); clearField('scale', () => { setScale('') }) }}>{t('resetTransform')}</Button>
           <span style={{ flex: '1 1 120px', minWidth: 0, fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('transformHint')}</span>
         </div>
       </Section>
       <Section title={t('elementActions')}>
       <label style={fieldLabel}>{t('editText')}<Input value={text} placeholder={beforeRef.current !== '' ? beforeRef.current : t('noEditableText')} onChange={(e: ChangeEvent<HTMLInputElement>) => { setText(e.target.value); touch('text') }} onKeyDown={(e: ReactKeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') { e.preventDefault(); applyText() } }} /></label>
       <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('textLiveHint')}</span>
+      {scope === 'group' ? (
+        <span style={{ fontSize: 11, lineHeight: '16px', color: tok.warn }}>{t('textScopeNote')}</span>
+      ) : null}
       <span style={{ fontSize: 11, lineHeight: '16px', color: textIssue !== undefined && textIssue !== t('textApplied') ? 'var(--dsw-alias-state-warn-primary)' : tok.labelTertiary }}>
         {t('textWhere')}: {hostRef.current === undefined ? '—' : selectorOf(hostRef.current)}{textIssue === undefined ? '' : ' · ' + textIssue}
       </span>
@@ -2173,10 +2783,59 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
         <div className="dsh-myskin-card" style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, fontSize: 12, lineHeight: '18px' }}>
           <strong style={{ fontSize: 13, lineHeight: '20px', fontWeight: 500, color: tok.labelSecondary }}>{t('embedBg')}</strong>
           {draft.canvas.images.map((img) => {
-            const host = safeQuery(img.selector)
+            const anchor = anchorOf(img)
+            const host = resolveImageAnchor(img, document)
+            const ok = anchorResolves.get(img.id) === true
+            const selectStyle: CSSProperties = { background: tok.bgBase, color: tok.labelPrimary, border: '1px solid ' + tok.borderL2, borderRadius: 6, fontSize: 12, lineHeight: '18px', padding: '2px 6px' }
             return (
               <div key={img.id} style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 8, borderTop: '1px solid ' + tok.borderL2 }}>
-                <span title={img.selector} style={{ color: tok.labelTertiary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{host === null ? img.selector : elementLabel(host, 30)}</span>
+                <span title={img.selector} style={{ color: tok.labelTertiary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {ok && host !== undefined ? elementLabel(host, 30) : anchorLabel(anchor, t)}
+                </span>
+                {/* 锚定：图片跟随谁。元素=结构选择器；文字=跟着这段文案；内置组件=固定部位 */}
+                <div className="dsh-myskin-field" style={{ gap: 6 }}>
+                  <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('anchor')}</span>
+                  <select value={anchor.kind} title={t('anchorHint')} style={selectStyle}
+                    onChange={(e: ChangeEvent<HTMLSelectElement>) => { onEmbedAnchor(img.id, defaultAnchor(e.target.value as AnchorKind, img, target, groupAnchor)) }}>
+                    <option value="element">{t('anchorKindElement')}</option>
+                    <option value="text">{t('anchorKindText')}</option>
+                    <option value="component">{t('anchorKindComponent')}</option>
+                    {/* 整组：一张图贴到整类元素上（每条工作区行一张，含之后新建的） */}
+                    <option value="group" disabled={groupAnchor === undefined}>{t('anchorKindGroup')}</option>
+                  </select>
+                  {anchor.kind === 'component' ? (
+                    <select value={anchor.value} title={t('anchorHint')} style={{ ...selectStyle, flex: '1 1 90px', minWidth: 90 }}
+                      onChange={(e: ChangeEvent<HTMLSelectElement>) => { onEmbedAnchor(img.id, { kind: 'component', value: e.target.value }) }}>
+                      {ANCHOR_COMPONENTS.map((component) => (<option key={component.id} value={component.id}>{t(component.labelKey)}</option>))}
+                    </select>
+                  ) : (
+                    <Input value={anchor.value}
+                      title={anchor.kind === 'text' ? t('anchorTextHint') : t('anchorSelectorHint')}
+                      placeholder={anchor.kind === 'text' ? t('anchorTextPlaceholder') : t('anchorSelectorPlaceholder')}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => { onEmbedAnchor(img.id, { kind: anchor.kind, value: e.target.value }) }} />
+                  )}
+                  {anchor.kind === 'element' ? (
+                    <Button style={btnBase} size="sm" variant="ghost" onClick={() => { onEmbedAnchor(img.id, anchorFromElement(target)) }}>{t('anchorUseSelected')}</Button>
+                  ) : null}
+                  {anchor.kind === 'text' ? (
+                    <Button style={btnBase} size="sm" variant="ghost" title={t('anchorUseTextHint')}
+                      onClick={() => { const copy = anchorTextOf(target); if (copy !== undefined) onEmbedAnchor(img.id, { kind: 'text', value: copy, label: copy }) }}>{t('anchorUseText')}</Button>
+                  ) : null}
+                </div>
+                <div className="dsh-myskin-field" style={{ gap: 6 }}>
+                  <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('imageMode')}</span>
+                  <select value={imageModeOf(img)} title={t('imageModeHint')} style={selectStyle}
+                    onChange={(e: ChangeEvent<HTMLSelectElement>) => { onEmbedMode(img.id, e.target.value as ImageMode) }}>
+                    <option value="embed">{t('imageModeEmbed')}</option>
+                    <option value="anchor">{t('imageModeAnchor')}</option>
+                  </select>
+                  <span style={{ flex: '1 1 120px', minWidth: 0, fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>
+                    {imageModeOf(img) === 'anchor' ? t('imageModeAnchorNote') : t('imageModeEmbedNote')}
+                  </span>
+                </div>
+                <span style={{ fontSize: 11, lineHeight: '16px', color: ok ? tok.success : tok.warn }}>
+                  {ok ? t('anchorOk') + ' · ' + anchorLabel(anchor, t) : t('anchorMissing')}
+                </span>
                 <div className="dsh-myskin-field" style={{ gap: 6 }}>
                   <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('opacity')}</span>
                   <input type="range" min={0} max={100} value={Math.round((img.opacity ?? 1) * 100)} onChange={(e) => { onEmbedOpacity(img.id, Number(e.target.value) / 100) }} style={{ flex: '1 1 70px', minWidth: 70 }} />

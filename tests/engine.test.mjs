@@ -746,3 +746,129 @@ test('re-applying a text override survives a React-style rebuild of the node', a
   assert.equal(placeholder.textContent, '你想让我做什么？')
   override.dispose()
 })
+
+test('a canvas move rewrites only the transform, never the element’s other declarations', () => {
+  // The drag used to merge through withManagedDeclarations, which drops every managed
+  // property and re-adds only the transform: a moved element lost — and the Inspector's
+  // preview immediately restored — its width/padding/font-size on every frame.
+  const existing = 'font-size: 20px !important; width: 120px; transform: translate(4px, 2px) !important; cursor: pointer'
+  const moved = engine.transformEdit(existing, 10, 0, 1)
+  assert.equal(moved, 'font-size: 20px !important; width: 120px; transform: translate(10px, 0px) !important; cursor: pointer')
+  // The written form carries the same !important the Inspector's own preview uses:
+  // a rule that alternates between the two forms changes which stylesheet wins.
+  assert.match(moved, /transform: translate\(10px, 0px\) !important/)
+  // Dragging back to the origin drops the property instead of pinning `transform: none`.
+  assert.equal(engine.transformEdit(existing, 0, 0, 1), 'font-size: 20px !important; width: 120px; cursor: pointer')
+  assert.equal(engine.transformEdit(undefined, 0, 0, 1), '')
+  // Round-trip with the Inspector's own proposal (every field it mirrors, re-emitted
+  // with its !important): the rule the drag just wrote reads as unchanged, so the
+  // panel pushes no echo — and no undo step — per frame.
+  const echoed = engine.withManagedDeclarations(moved,
+    'font-size: 20px !important; width: 120px !important; transform: translate(10px, 0px) !important')
+  assert.equal(engine.sameDeclarations(moved, echoed), true)
+  // A hand-written transform that is not ours must survive a preview untouched.
+  assert.equal(engine.declarationOf('transform: rotate(3deg); color: red', 'transform'), 'transform: rotate(3deg)')
+  assert.equal(engine.declarationOf('color: red', 'transform'), undefined)
+})
+
+test('the editor’s draft stylesheet is kept after the committed one', () => {
+  const window = setup()
+  const head = window.document.head
+  const draft = window.document.createElement('style')
+  draft.id = 'dsh-myskin-live'
+  head.appendChild(draft)
+  // Nothing lands behind it: no re-append (that would re-evaluate the sheet for nothing).
+  engine.keepStylesheetLast(draft)
+  assert.equal(head.lastElementChild, draft)
+  // applySkin appends a NEW tag on every accepted settings change. A committed rule
+  // sitting behind the draft wins by document order, which pins the element to the old
+  // coordinates on every drag frame — the "new/old coordinates" flicker.
+  const committed = window.document.createElement('style')
+  committed.id = 'dsh-myskin-rule'
+  head.appendChild(committed)
+  engine.keepStylesheetLast(draft)
+  assert.equal(head.lastElementChild, draft)
+  assert.equal(head.contains(committed), true, 'the committed sheet is moved in front, never dropped')
+  // A tag that is not mounted is left alone.
+  engine.keepStylesheetLast(null)
+  const stray = window.document.createElement('style')
+  engine.keepStylesheetLast(stray)
+  assert.equal(stray.parentNode, null)
+})
+
+
+test('the panel never echoes a transform the canvas owns', () => {
+  // The heart of the twitch: the grip writes the rule (T1) and the panel mirrors it back
+  // one render late (its fields still hold T0). If the preview took the fields as the
+  // source of truth it would write T0 straight back — and the element would alternate
+  // between the two coordinates for as long as the gesture lasts.
+  const rule = 'transform: translate(40px, 12px) !important'
+  const staleFields = { x: 20, y: 4, scale: 1 }
+  assert.equal(engine.transformPreview(rule, staleFields, false), 'transform: translate(40px, 12px) !important')
+  // With nothing to mirror the preview contributes nothing at all.
+  assert.equal(engine.transformPreview(undefined, staleFields, false), '')
+  // A hand-written transform survives too (it is re-emitted, never reformatted away).
+  assert.equal(engine.transformPreview('transform: rotate(3deg)', staleFields, false), 'transform: rotate(3deg)')
+  // Once the user edits one of those fields the panel IS the writer again — including the
+  // "cleared to identity" case, which has to drop the property rather than pin a value.
+  assert.equal(engine.transformPreview(rule, { x: 20, y: 4, scale: 1 }, true), 'transform: translate(20px, 4px) !important')
+  assert.equal(engine.transformPreview(rule, { x: 0, y: 0, scale: 1 }, true), '')
+  // …and the round trip through the drag's own writer is a no-op, i.e. no echo, no undo
+  // step, no repaint churn while the pointer is moving.
+  const afterDrag = engine.transformEdit(rule, 20, 4, 1)
+  assert.equal(engine.sameDeclarations(afterDrag, engine.withManagedDeclarations(afterDrag, engine.transformPreview(afterDrag, { x: 20, y: 4, scale: 1 }, true))), true)
+})
+
+
+test('a removed element can be measured while the skin still hides it', () => {
+  // The recycle bin's restore has to win against the COMMITTED rule, which needs the
+  // element's natural display — read while both skin stylesheets are momentarily off.
+  const window = setup()
+  window.document.head.innerHTML = '<style id="dsh-myskin-rule">#go { display: none !important }</style>'
+  window.document.body.innerHTML = '<div id="root"><button id="go">Send</button></div>'
+  const sheet = window.document.getElementById('dsh-myskin-rule')
+  const el = window.document.getElementById('go')
+  const before = sheet.disabled
+  const display = engine.naturalDisplayOf(el)
+  assert.equal(typeof display, 'string')
+  assert.notEqual(display, 'none')
+  // The measurement is synchronous and puts the skin back exactly as it was.
+  assert.equal(sheet.disabled, before)
+  assert.equal(window.document.head.contains(sheet), true, 'the skin stylesheet is re-inserted')
+  assert.equal(window.document.getElementById('go'), el, 'the element is not replaced or moved')
+  // An element the APP hides is not "removed by the skin": there is nothing to restore,
+  // and the caller gets undefined rather than a value that would not show anything.
+  window.document.getElementById('go').style.display = 'none'
+  assert.equal(engine.naturalDisplayOf(el), undefined)
+})
+
+
+test('a save lands the committed skin in front of the draft, and it is put back behind', () => {
+  // The end-to-end shape of the flicker fix. Both layers carry the SAME selector, so the
+  // "new"/"old" value is decided by document order (jsdom does not model that resolution,
+  // so the consequence is documented here and asserted on the browser-side invariants).
+  const window = setup()
+  window.document.body.innerHTML = '<div id="root"><button id="go">Send</button></div>'
+  const el = window.document.getElementById('go')
+  // The editor is open: its draft layer is in <head> and is what the page shows.
+  const draft = window.document.createElement('style')
+  draft.id = engine.DRAFT_STYLE_ID
+  draft.textContent = '#go { display: block }'
+  window.document.head.appendChild(draft)
+  assert.equal(window.getComputedStyle(el).display, 'block')
+  // 保存 re-applies the document, and applySkin APPENDS a new stylesheet: the committed
+  // (older) rule now sits AFTER the draft's. Without the correction the element is pinned
+  // to the committed coordinates on every drag frame — the "twitch".
+  const override = engine.applySkin(fakeTheme(), {
+    ...SKIN, text: [], layers: [], css: [{ selector: '#go', rule: 'display: none !important' }],
+  })
+  const committed = window.document.getElementById('dsh-myskin-rule')
+  assert.equal(window.document.head.lastElementChild, committed, 'this is what applySkin does on every accepted change')
+  engine.keepStylesheetLast(draft)
+  assert.equal(window.document.head.lastElementChild, draft, 'the editor corrects the order again')
+  assert.equal(window.document.head.contains(committed), true, 'the committed sheet is only moved, never dropped')
+  draft.remove()
+  override.dispose()
+  assert.equal(window.document.head.querySelectorAll('style').length, 0, 'nothing is left behind')
+})
+

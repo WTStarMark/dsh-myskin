@@ -193,6 +193,16 @@ function checkInstall(dshRoot) {
   else note('predates --dsh-frame-chrome-top; the editor aligns to --dsh-windows-titlebar-height on both')
   if (tree(frontend).includes('body>:not(#root)') && !manifest.dsh?.client) note('package.json has no dsh.client declaration')
 
+  // 4b. Font-role hooks. 界面/正文/代码 write ordinary CSS, but two of the three hang off
+  //     variables the APP has to read: a role pointing at a variable nobody consumes looks
+  //     applied and does nothing at all (the failure mode with no error message).
+  const frontendSource = tree(frontend)
+  if (frontendSource.includes('--dsw-font-family') && frontendSource.includes('--ds-font-family-code')) {
+    ok('font roles resolve (--dsw-font-family for 界面, --ds-font-family-code for 代码)')
+  } else {
+    bad('font-role variables missing from the web frontend: 界面/代码 字体 would silently do nothing')
+  }
+
   // 5. DOM contracts the skin engine and the editor read off the RENDERED app.
   //    These are not APIs, so no type check can see them: a renamed attribute
   //    silently turns a feature into a no-op (dark tokens would fall back to the

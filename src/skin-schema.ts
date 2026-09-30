@@ -29,6 +29,43 @@ export interface TextOverride { selector: string; before: string; after: string 
 /** CSS `mix-blend-mode` available for an embedded image layer. */
 export type BlendMode = 'normal' | 'multiply' | 'screen' | 'overlay'
 
+/**
+ * How an embedded image is painted.
+ *
+ *   - `embed`  (组件嵌入): painted INSIDE the anchored component, as its `::after` — clipped by
+ *               the container, above its background and below its content (0.3.8 behaviour);
+ *   - `anchor` (组件锚定): painted OUTSIDE it, on a skin-owned overlay tracked to the
+ *               component's box — never clipped, offsets may be negative, and the host
+ *               element's own `position` / `overflow` are left completely alone.
+ */
+export type ImageMode = 'embed' | 'anchor'
+
+/** What an embedded image is glued to. */
+export type AnchorKind = 'element' | 'text' | 'component' | 'group'
+
+/**
+ * The anchor of an embedded image: WHAT the picture follows.
+ *
+ * A structural selector alone breaks the moment React reshuffles a sibling — and a user
+ * who changes a button's copy should not lose the ornament glued to it. So an image may be
+ * anchored to one element (the selector), to a piece of copy (the text — resolved by what
+ * the app actually renders), or to a named landmark of the DSH UI (the component catalog in
+ * `src/client/anchors.ts`). All three end up as one real element; the engine tags that
+ * element with `data-dsh-myskin-embed="<image id>"` and re-resolves the anchor across
+ * React rebuilds.
+ */
+export interface ImageAnchor {
+  kind: AnchorKind
+  /**
+   * element → a structural selector; text → the copy to follow; component → catalog id;
+   * group → a block selector, in which case EVERY match is painted (the image lands on each
+   * workspace row, including the ones created later).
+   */
+  value: string
+  /** Human label frozen when the anchor was authored, so the list still reads well later. */
+  label?: string
+}
+
 /** One background image embedded behind a container's content (not a fixed overlay). */
 export interface EmbeddedImage {
   id: string
@@ -44,8 +81,18 @@ export interface EmbeddedImage {
   opacity?: number
   /** CSS mix-blend-mode applied over the container's background (default normal). */
   blend?: BlendMode
-  /** Structural fallback selector (re-applied to the real page on apply). */
+  /**
+   * Structural selector of the element the image was embedded on.
+   *
+   * Kept as the identity of last resort: it is what a legacy document (written before
+   * anchors existed) carries, and what a text/component anchor falls back to when the
+   * anchor itself cannot be resolved right now.
+   */
   fallbackSelector?: string
+  /** What the image follows. Absent = the legacy behaviour (the selector IS the anchor). */
+  anchor?: ImageAnchor
+  /** How it is painted. Absent = `embed` (组件嵌入), which is what 0.3.8 wrote. */
+  mode?: ImageMode
   /** Settings-page scope the image was embedded on (''/undefined = global). */
   pageKey?: string
 }
@@ -131,6 +178,21 @@ export const EMPTY_SKIN: SkinSettings = {
   library: [],
 }
 
+/**
+ * Defensive copy of one embedded image.
+ *
+ * The anchor is a nested object, so a plain spread would hand two documents the same
+ * reference and an edit in the editor would reach into the persisted value.
+ * @param img - the image to copy.
+ * @returns an independent copy.
+ */
+function cloneImage(img: EmbeddedImage): EmbeddedImage {
+  const copy: EmbeddedImage = { ...img }
+  if (img.anchor === undefined) delete copy.anchor
+  else copy.anchor = { ...img.anchor }
+  return copy
+}
+
 /** Defensive copy; keeps the persisted document immutable. */
 export function cloneSkin(skin: SkinSettings): SkinSettings {
   return {
@@ -140,7 +202,7 @@ export function cloneSkin(skin: SkinSettings): SkinSettings {
     text: (skin.text ?? []).map((o) => ({ selector: o.selector, before: o.before, after: o.after })),
     canvas: {
       ...(skin.canvas ?? { images: [] }),
-      images: (skin.canvas?.images ?? []).map((i) => ({ ...i })),
+      images: (skin.canvas?.images ?? []).map(cloneImage),
     },
     layers: (skin.layers ?? []).map((l) => ({ ...l })),
     library: (skin.library ?? []).map((s) => ({
@@ -151,11 +213,20 @@ export function cloneSkin(skin: SkinSettings): SkinSettings {
       text: (s.text ?? []).map((o) => ({ selector: o.selector, before: o.before, after: o.after })),
       canvas: {
         ...(s.canvas ?? { images: [] }),
-        images: (s.canvas?.images ?? []).map((i) => ({ ...i })),
+        images: (s.canvas?.images ?? []).map(cloneImage),
       },
       layers: (s.layers ?? []).map((l) => ({ ...l })),
     })),
   }
+}
+
+/**
+ * The effective painting mode of one image.
+ * @param img - the embedded image.
+ * @returns `anchor` only when it was asked for; anything else is 组件嵌入.
+ */
+export function imageModeOf(img: EmbeddedImage): ImageMode {
+  return img.mode === 'anchor' ? 'anchor' : 'embed'
 }
 
 /** Parse/validate a defensive copy (no schemastery; structural only). */

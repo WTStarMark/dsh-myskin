@@ -107,3 +107,21 @@ test('the picking cursor is a root attribute, so it is trivially reversible', ()
   assert.equal(doc.documentElement.hasAttribute(ui.CANVAS_UI_ATTR), false)
   assert.equal(doc.documentElement.outerHTML.includes('data-dsh-myskin-draw'), false)
 })
+
+test('the font list rows cannot be shrunk out of existence', () => {
+  // Reported from a screenshot: "本机字体 · 224" with a scrollable but completely EMPTY list.
+  // A flex item with `overflow: hidden` has an automatic minimum size of ZERO, so 224 rows in a
+  // height-constrained column collapsed to their padding floor — and the row's own
+  // `overflow: hidden` (there for the ellipsis) then clipped the line box away. Rows you can
+  // scroll past, not one you can read.
+  const row = /\[data-dsh-myskin-canvas\] \.dsh-myskin-fontpick \{([^}]*)\}/.exec(RULES)
+  assert.notEqual(row, null, 'the font row rule must exist')
+  assert.match(row[1], /flex:\s*none|flex-shrink:\s*0/, 'a row must never shrink')
+  assert.match(row[1], /min-height:\s*\d+px/, 'a row must keep its line box')
+  assert.match(row[1], /box-sizing:\s*border-box/, 'width:100% + padding must not overflow sideways')
+  // The card around it is content, not rubber: without this the panel squeezes it (and, at the
+  // limit, everything after it) instead of scrolling.
+  const card = /\[data-dsh-myskin-canvas\] \.dsh-myskin-card \{([^}]*)\}/.exec(RULES)
+  assert.match(card[1], /flex:\s*none/)
+})
+

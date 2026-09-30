@@ -40,6 +40,18 @@ const textRule = z.object({
 /** CSS mix-blend-mode shared by both image kinds. */
 const blend = z.union(['normal', 'multiply', 'screen', 'overlay']).default('normal')
 
+/**
+ * What one embedded image follows — see `ImageAnchor` in ./skin-schema.ts.
+ *
+ * This MUST stay in the schema: DSH coerces every write through it, so a field the Host
+ * does not know about is silently dropped and the anchor would never reach the document.
+ */
+const imageAnchor = z.object({
+  kind: z.union(['element', 'text', 'component', 'group']).default('element'),
+  value: z.string().default(''),
+  label: z.string().default(''),
+})
+
 /** Container-embedded background image (behind the container content). */
 const embeddedImage = z.object({
   id: z.string().default(''),
@@ -52,6 +64,8 @@ const embeddedImage = z.object({
   opacity: z.number().default(1),
   blend,
   fallbackSelector: z.string().default(''),
+  anchor: imageAnchor.default({}),
+  mode: z.union(['embed', 'anchor']).default('embed'),
   pageKey: z.string().default(''),
 })
 

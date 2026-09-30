@@ -1,7 +1,7 @@
 {
   "name": "dsh-myskin",
-  "description": "DSH 通用皮肤框架：可视化自定义 + 实时预览 + 「皮肤管理」设置页。非侵入式、可逆覆盖层；适配 DSH 0.1.7-rc.2 / 0.2.0-rc.1（Web 与 Desktop 共用同一条客户端插件管线）。",
-  "version": "0.3.8",
+  "description": "DSH 通用皮肤框架：可视化自定义 + 实时预览 + 「皮肤管理」设置页。非侵入式、可逆覆盖层；适配 DSH 0.1.7-rc.2 / 0.2.0-rc.1 / 0.2.0-rc.2（Web 与 Desktop 共用同一条客户端插件管线）。",
+  "version": "0.3.9",
   "license": "MIT",
   "author": "WTStarMark <2182219890@qq.com>",
   "repository": { "type": "git", "url": "git+https://github.com/WTStarMark/dsh-myskin.git" },

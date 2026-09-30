@@ -9,6 +9,8 @@ package-lock.json
 
 # ── 打包 / 发布产物（本地生成，不进仓库）────────────────────────────
 *.zip
+# 打包脚本先写 .part、再原子改名，崩溃时留下的半成品同样不入库
+*.part
 *.tar.gz
 *.dshskin
 dsh-myskin-*/

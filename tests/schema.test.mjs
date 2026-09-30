@@ -53,8 +53,27 @@ test('Config accepts a realistic skin document and fills nested defaults', { ski
     text: [{ selector: '#hero', before: 'a', after: 'b' }],
     layers: [{ id: 'char', selector: 'body', x: 4 }],
     library: [{ id: 'one', name: 'One', layers: [{ id: 'l', selector: 'body' }] }],
+    canvas: { images: [{ id: 'i1', selector: '[data-dsh-myskin-embed="i1"]', url: 'data:image/gif;base64,AA', anchor: { kind: 'text', value: '新对话' }, mode: 'anchor' }] },
   }))
   assert.equal(value.enabled, true)
+  // The anchor MUST survive the Host schema: DSH coerces every write through it, so a field
+  // the schema does not know about is dropped and the image would silently lose its anchor.
+  assert.equal(value.canvas.images[0].anchor.kind, 'text')
+  assert.equal(value.canvas.images[0].anchor.value, '新对话')
+  assert.equal(value.canvas.images[0].mode, 'anchor', 'the painting mode must survive the Host schema too')
+  // The 整组 anchor kind is the newest addition and the one a STALE Host rejects outright: the
+  // whole canvas field is refused, css still passes, and the editor can only say "保存失败：canvas".
+  // Pinning it here means a Host built from this source accepts it — and that the client's message
+  // about a stale Host is the right diagnosis whenever a running Host does not.
+  const grouped = plain(host.Config({
+    canvas: { images: [{ id: 'i2', selector: '[data-dsh-myskin-embed="i2"]', url: 'data:image/gif;base64,AA', mode: 'embed', anchor: { kind: 'group', value: '[role="treeitem"][aria-expanded]', label: '工作区行' } }] },
+  }))
+  assert.equal(grouped.canvas.images[0].anchor.kind, 'group')
+  assert.equal(grouped.canvas.images[0].anchor.value, '[role="treeitem"][aria-expanded]')
+  // A document written before anchors existed still resolves — to the legacy element anchor.
+  const legacy = plain(host.Config({ canvas: { images: [{ id: 'i1', selector: 's', url: 'u' }] } }))
+  assert.equal(legacy.canvas.images[0].anchor.kind, 'element')
+  assert.equal(legacy.canvas.images[0].mode, 'embed', 'a 0.3.8 document keeps painting inside')
   assert.equal(value.tokens['--dsw-alias-bg-base'].dark, '#000000')
   assert.equal(value.layers[0].kind, 'img')
   assert.equal(value.layers[0].x, 4)
@@ -79,4 +98,10 @@ test('cloneSkin deep-copies the nested layers and library', () => {
   copy.library[0].name = 'changed'
   assert.equal(source.layers[0].selector, 'body')
   assert.equal(source.library[0].name, 'X')
+  // The anchor is a nested object too: a shallow copy would let an editor edit reach into
+  // the persisted document.
+  const anchored = skin.parseSkin({ canvas: { images: [{ id: 'i', selector: 's', url: 'u', anchor: { kind: 'text', value: '新对话' } }] } })
+  const cloned = skin.cloneSkin(anchored)
+  cloned.canvas.images[0].anchor.value = 'changed'
+  assert.equal(anchored.canvas.images[0].anchor.value, '新对话')
 })

@@ -13,10 +13,14 @@
 
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
 import type { CssRule, EmbeddedImage, InjectedLayer, SkinSettings, TextOverride, TokenModes } from '../skin-schema.ts'
+import { imageModeOf } from '../skin-schema.ts'
+import { anchorOf, componentById } from './anchors.ts'
 import { readDesktopShell } from './desktop.ts'
 
 export const PLUGIN_ID = 'dsh-myskin'
 const STYLE_ID = 'dsh-myskin-rule'
+/** Id of the canvas editor's draft stylesheet — the layer that must win while it is open. */
+export const DRAFT_STYLE_ID = 'dsh-myskin-live'
 
 /** Handle returned by `applySkin`; call `dispose` to revert. */
 export interface SkinOverride {
@@ -286,6 +290,85 @@ export function mergeDeclaration(rule: string | undefined, addition: string): st
  */
 export function withoutDeclaration(rule: string | undefined, property: string): string {
   return declarationPairs(rule ?? '').filter(([prop]) => prop !== property).map(([prop, value]) => prop + ': ' + value).join('; ')
+}
+
+/**
+ * One declaration pair exactly as stored (the value keeps its `!important`).
+ *
+ * Used by the canvas editor when it has to re-emit somebody else's declaration
+ * unchanged instead of reformatting it (a hand-written `transform: rotate(3deg)`
+ * must survive a preview that only owns the X/Y offsets).
+ * @param rule - the declaration block, or undefined.
+ * @param property - the property to read.
+ * @returns `property: value`, or undefined when the block does not declare it.
+ */
+export function declarationOf(rule: string | undefined, property: string): string | undefined {
+  const found = declarationPairs(rule ?? '').find(([prop]) => prop === property)
+  return found === undefined ? undefined : found[0] + ': ' + found[1]
+}
+
+/** One control the document currently removes — a recycle-bin entry. */
+export interface RemovedControl {
+  /** The selector the removal is stored under. */
+  selector: string
+  /** The element's whole declaration block. */
+  rule: string
+}
+
+/**
+ * Whether a rule takes its element out of the layout.
+ *
+ * `display: none` is what 「移除控件（不占位）」 writes. The test is on the parsed
+ * property/value pair rather than a regex over the block, so a hand-written rule that
+ * merely mentions the words is not mistaken for a removal, and so `!important` (which
+ * {@link declarationPairs} keeps inside the value) still counts.
+ * @param rule - the declaration block, or undefined.
+ * @returns true when the element is removed.
+ */
+export function isRemovedRule(rule: string | undefined): boolean {
+  return declarationPairs(rule ?? '').some(([property, value]) =>
+    property === 'display' && value.replace(/\s*!important\s*$/i, '').trim().toLowerCase() === 'none')
+}
+
+/**
+ * Everything the skin currently removes — the recycle bin's contents.
+ *
+ * Removal is one CSS declaration, so the bin is DERIVED from the document instead of
+ * being a second list that can drift out of sync with it (and it survives a reload for
+ * free). The element is still in the DOM — `display: none` only stops it being
+ * painted and hit-tested — which is what lets the UI resolve a readable label for an
+ * entry that the canvas itself can no longer select.
+ * @param css - the skin's rule list.
+ * @returns one entry per removed selector, in document order.
+ */
+export function removedControls(css: readonly CssRule[]): RemovedControl[] {
+  return css
+    .filter((r) => r.selector !== '' && isRemovedRule(r.rule))
+    .map((r) => ({ selector: r.selector, rule: r.rule }))
+}
+
+/**
+ * Restore one removed control: drop its `display` declaration, and the rule itself
+ * when that was the only thing customised on the element.
+ * @param css - the skin's rule list.
+ * @param selector - the entry to restore.
+ * @returns a new rule list.
+ */
+export function withControlRestored(css: readonly CssRule[], selector: string): CssRule[] {
+  return css.flatMap((r) => {
+    if (r.selector !== selector) return [r]
+    const rest = withoutDeclaration(r.rule, 'display')
+    return rest === '' ? [] : [{ selector: r.selector, rule: rest }]
+  })
+}
+
+/**
+ * Restore every removed control at once (the bin's 「全部恢复」).
+ * @param css - the skin's rule list.
+ * @returns a new rule list.
+ */
+export function withAllControlsRestored(css: readonly CssRule[]): CssRule[] {
+  return removedControls(css).reduce((list, entry) => withControlRestored(list, entry.selector), [...css])
 }
 
 /** First direct text node of an element that carries non-whitespace content. */
@@ -708,6 +791,122 @@ export function parseTransform(rule: string | undefined): { x: number; y: number
 }
 
 /**
+ * Write an X/Y/scale edit into one element's rule.
+ *
+ * Only `transform` is touched: every other declaration the element carries — the
+ * Inspector's managed ones included — stays exactly as it was. This is the fix for the
+ * drag "twitch": the canvas gesture used to merge through
+ * {@link withManagedDeclarations}, which DROPS every managed property and re-adds only
+ * the transform, so a moved element lost — and the Inspector's preview restored — its
+ * width, padding or font-size once per frame.
+ *
+ * The declaration is also written with the same `!important` the Inspector's own
+ * preview uses: a rule that alternates between `transform: …` and
+ * `transform: … !important` changes which stylesheet wins, which is what made the
+ * element jump between the draft position and the committed one.
+ * @param existing - the element's current declaration block.
+ * @param x - horizontal offset in px.
+ * @param y - vertical offset in px.
+ * @param scale - uniform scale (1 = untouched).
+ * @returns the new declaration block (`''` when the rule is now empty).
+ */
+export function transformEdit(existing: string | undefined, x: number, y: number, scale: number): string {
+  const value = transformValue(x, y, scale)
+  return value === ''
+    ? withoutDeclaration(existing, 'transform')
+    : mergeDeclaration(existing, 'transform: ' + value + ' !important')
+}
+
+/**
+ * The `transform` declaration the Inspector should preview (and therefore write).
+ *
+ * The panel's X/Y/scale fields are a MIRROR of the element's rule whenever a canvas grip is
+ * the writer, and a mirror is one render behind by construction. Echoing it back is what made
+ * a dragged element alternate between the coordinates the user had just reached and the ones
+ * before them — the "twitch". So the fields are the source only while the panel authored them
+ * (`authored`); otherwise the rule's own declaration is re-emitted verbatim, which also stops
+ * the preview — it replaces every managed property — from silently DROPPING a move that is
+ * already in the rule.
+ * @param rule - the element's current declaration block.
+ * @param fields - the numbers the panel currently shows.
+ * @param authored - true when the user just edited one of those fields.
+ * @returns the declaration to include (`''` = no transform of ours).
+ */
+export function transformPreview(
+  rule: string | undefined,
+  fields: { x: number; y: number; scale: number },
+  authored: boolean,
+): string {
+  if (!authored) return declarationOf(rule, 'transform') ?? ''
+  const value = transformValue(fields.x, fields.y, fields.scale)
+  return value === '' ? '' : 'transform: ' + value + ' !important'
+}
+
+/**
+ * The `display` an element has once no skin stylesheet removes it.
+ *
+ * Restoring a control from the recycle bin has to be visible IMMEDIATELY, but the
+ * committed document is a second stylesheet carrying the same selector: until the next
+ * 保存 it still declares `display: none !important`, so simply dropping the declaration
+ * from the draft changes nothing on screen. Winning that fight needs a concrete value,
+ * and the only value that is right for every element is the application's own answer —
+ * so both skin stylesheets are taken out of the document for the two synchronous statements
+ * it takes to read it (nothing can paint in between) and put back exactly where they were.
+ * Detaching rather than `sheet.disabled = true`: the IDL flag is not implemented everywhere
+ * (jsdom, for one), and a sheet that stays in the document keeps winning regardless of it.
+ * @param el - the element that has to become visible again.
+ * @returns the natural display value, or undefined when it cannot be read.
+ */
+export function naturalDisplayOf(el: Element): string | undefined {
+  const doc = el.ownerDocument
+  const head = doc.head
+  if (head === null) return undefined
+  const sheets = [doc.getElementById(STYLE_ID), doc.getElementById(DRAFT_STYLE_ID)]
+    .filter((node): node is HTMLStyleElement => node !== null && node.tagName === 'STYLE')
+  const placed = sheets.map((sheet) => ({ sheet, next: sheet.nextSibling }))
+  try {
+    for (const sheet of sheets) sheet.remove()
+    const value = doc.defaultView?.getComputedStyle(el).display ?? ''
+    const display = value.trim()
+    return display === '' || display === 'none' ? undefined : display
+  } catch {
+    return undefined
+  } finally {
+    // Same position, same order: the editor's draft tag has to stay the LAST stylesheet.
+    // Falling back to append keeps a sheet that lost its anchor in the document (the
+    // editor's observer re-appends the draft behind it anyway).
+    for (const { sheet, next } of placed) {
+      if (sheet.parentNode !== null) continue
+      if (next !== null && next.parentNode === head) head.insertBefore(sheet, next)
+      else head.appendChild(sheet)
+    }
+  }
+}
+
+/**
+ * Keep one stylesheet LAST inside `<head>`.
+ *
+ * The canvas editor previews the DRAFT through its own `<style id="dsh-myskin-live">`,
+ * while the committed document is what {@link applySkin} writes. DSH re-applies the
+ * skin on every accepted settings change and `applySkin` appends a NEW tag each time,
+ * so after the first 保存 the committed (old) rule sits AFTER the draft's one.
+ * Identical selectors are resolved by document order: the element snapped back to the
+ * committed coordinates on every drag frame — the "new coordinates / old coordinates"
+ * flicker.
+ *
+ * The draft layer has to win while the editor is open (its tag is removed on unmount,
+ * and the committed skin takes over again), so it is re-appended whenever anything
+ * lands behind it.
+ * @param tag - the editor's stylesheet, or null when it is not mounted.
+ */
+export function keepStylesheetLast(tag: Element | null): void {
+  if (tag === null || typeof document === 'undefined') return
+  const head = tag.parentNode
+  if (head === null || head !== document.head) return
+  if (head.lastElementChild !== tag) head.appendChild(tag)
+}
+
+/**
  * Whether two declaration blocks say the same thing.
  *
  * Order and the `!important` flag are ignored on purpose: the Inspector preview always
@@ -877,6 +1076,302 @@ export function selectorOf(el: Element): string {
     return rest === '' ? base : base + ' > ' + rest
   }
   return 'body > ' + pathWithin(el.ownerDocument.body, el)
+}
+
+/**
+ * Resolve one selector to the single element a skin should attach to.
+ *
+ * Several matches are normal (the workspace tree and the session list are both
+ * `[role="tree"]`; a collapsing sidebar keeps two copies mounted for a frame). A VISIBLE
+ * match wins — browsers can answer that, jsdom cannot and falls back to the first, which
+ * keeps this testable — and the first match always beats giving up.
+ * @param selector - the selector to resolve.
+ * @returns the element, or undefined when nothing matches.
+ */
+function pickOne(selector: string): Element | undefined {
+  if (typeof document === 'undefined' || selector === '') return undefined
+  let elements: Element[]
+  try { elements = Array.from(document.querySelectorAll(selector)) } catch { return undefined }
+  if (elements.length === 0) return undefined
+  if (elements.length === 1) return elements[0]
+  return elements.find((el) => el.getClientRects().length > 0) ?? elements[0]
+}
+
+/**
+ * The innermost element of a candidate set: the one that actually owns the text.
+ * @param candidates - elements in document order.
+ * @returns the deepest candidate, or undefined for an empty set.
+ */
+function innermost(candidates: readonly Element[]): Element | undefined {
+  return candidates.find((el) => !candidates.some((other) => other !== el && el.contains(other))) ?? candidates[0]
+}
+
+/**
+ * Find the element whose own text (or field placeholder) is `wanted`.
+ *
+ * Exact matches win over "contains", and the innermost match wins over its ancestors: the
+ * user anchors to the line they can read, not to the wrapper around it.
+ * @param doc - the document to search.
+ * @param wanted - the trimmed copy to look for.
+ * @returns the element, or undefined when the copy is not on the page right now.
+ */
+function findByText(doc: Document, wanted: string): Element | undefined {
+  if (wanted === '') return undefined
+  const exact: Element[] = []
+  const loose: Element[] = []
+  for (const el of Array.from(doc.body?.querySelectorAll('*') ?? [])) {
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      const placeholder = (el as HTMLInputElement).placeholder.trim()
+      if (placeholder === wanted) exact.push(el)
+      else if (placeholder.includes(wanted)) loose.push(el)
+      continue
+    }
+    const node = directTextNode(el)
+    if (node === undefined) continue
+    const data = node.data.trim()
+    if (data === '') continue
+    if (data === wanted) exact.push(el)
+    else if (data.includes(wanted)) loose.push(el)
+  }
+  return innermost(exact) ?? innermost(loose)
+}
+
+/**
+ * The copy one element carries — what a text anchor freezes.
+ *
+ * Resolved through {@link textHostOf} so the result is the same string the Inspector shows in
+ * "编辑文字": the anchor follows the text the user sees, not the wrapper they happened to
+ * click.
+ * @param el - the element to read.
+ * @returns the trimmed copy, or undefined when there is none to anchor to.
+ */
+export function anchorTextOf(el: Element): string | undefined {
+  const host = textHostOf(el)
+  if (host === undefined) return undefined
+  if (host.tagName === 'INPUT' || host.tagName === 'TEXTAREA') {
+    const placeholder = (host as HTMLInputElement).placeholder.trim()
+    return placeholder === '' ? undefined : placeholder
+  }
+  const node = directTextNode(host)
+  const text = node?.data.trim() ?? ''
+  return text === '' ? undefined : text
+}
+
+/**
+ * Resolve the element one embedded image is anchored to.
+ *
+ * The anchor decides first (selector / copy / catalog landmark); the image's frozen
+ * structural selector is the identity of last resort, so a text anchor whose copy was edited
+ * away still paints where it used to instead of vanishing. `undefined` means "nothing to
+ * paint into right now" — the re-tag loop keeps the image alive and retries on the next DOM
+ * change, which is what makes an image survive a page that mounts its target late.
+ * @param img - the embedded image.
+ * @param doc - the document to resolve in.
+ * @returns the target element, or undefined.
+ */
+export function resolveImageAnchor(img: EmbeddedImage, doc: Document): Element | undefined {
+  const anchor = anchorOf(img)
+  const fallback = img.fallbackSelector ?? ''
+  if (anchor.kind === 'group') return pickOne(anchor.value) ?? pickOne(fallback)
+  if (anchor.kind === 'text') {
+    return findByText(doc, anchor.value.trim()) ?? pickOne(fallback)
+  }
+  if (anchor.kind === 'component') {
+    const component = componentById(anchor.value)
+    if (component === undefined) return pickOne(fallback)
+    return pickOne(component.selector) ?? pickOne(fallback)
+  }
+  return pickOne(anchor.value) ?? pickOne(fallback)
+}
+
+/**
+ * Every element one embedded image is anchored to.
+ *
+ * Almost every anchor resolves to ONE element; a 整组 anchor (`kind: 'group'`) resolves to the
+ * whole block, which is what lets one embedded image appear on every workspace row — and, because
+ * the block is a selector rather than a list of nodes, on the ones created later too.
+ * @param img - the embedded image.
+ * @param doc - the document to resolve in.
+ * @returns the targets (empty when nothing can be found right now).
+ */
+export function resolveImageTargets(img: EmbeddedImage, doc: Document): Element[] {
+  const anchor = anchorOf(img)
+  if (anchor.kind === 'group') {
+    const matches = allOf(doc, anchor.value)
+    if (matches.length > 0) return matches
+    const fallback = img.fallbackSelector ?? ''
+    return fallback === '' ? [] : allOf(doc, fallback).slice(0, 1)
+  }
+  const one = resolveImageAnchor(img, doc)
+  return one === undefined ? [] : [one]
+}
+
+/**
+ * All matches of a selector, never throwing on a malformed one.
+ * @param doc - the document.
+ * @param selector - the selector.
+ * @returns the matching elements, in document order.
+ */
+function allOf(doc: Document, selector: string): Element[] {
+  if (selector === '') return []
+  try { return Array.from(doc.querySelectorAll(selector)) } catch { return [] }
+}
+
+/**
+ * Whether an image can be attached at all: at least one way to find its element. Legacy
+ * documents carry only `fallbackSelector`; an anchored image may carry a catalog id or a
+ * piece of copy instead.
+ * @param img - the embedded image.
+ * @returns true when the image is worth resolving.
+ */
+function hasIdentity(img: EmbeddedImage): boolean {
+  const anchor = anchorOf(img)
+  return anchor.value !== '' || (img.fallbackSelector ?? '') !== ''
+}
+
+/** Marker on the skin-owned layer that carries 组件锚定 images. */
+export const OVERLAY_ATTR = 'data-dsh-myskin-overlay'
+/** Marker on one 组件锚定 image node (its value is the image id). */
+export const ANCHOR_IMAGE_ATTR = 'data-dsh-myskin-anchor-image'
+/**
+ * Stacking of the 组件锚定 layer: above the app's own surfaces, below its dialogs and menus
+ * (and far below the canvas editor's chrome). The layer ignores pointer events entirely, so
+ * a decoration can overlap a control without ever stealing a click.
+ */
+const OVERLAY_Z_INDEX = 900
+
+/** The 组件锚定 layer: what `mountImageOverlay` hands back. */
+export interface ImageOverlay {
+  /** Re-read every anchor's box and move the nodes (coalesced; safe to call per render). */
+  sync: () => void
+  /** Remove the layer, its nodes and every listener. */
+  dispose: () => void
+}
+
+/**
+ * Mount the layer that paints 组件锚定 (image anchored to a component, displayed OUTSIDE it).
+ *
+ * Why a tracked overlay instead of the `::after` 组件嵌入 uses: an `::after` lives inside the
+ * component's box, so it is clipped by whatever `overflow` the app put on the way down, and
+ * letting it escape would mean rewriting the host element's `overflow`/`position` — a real
+ * change to the app's own layout. A skin-owned, pointer-transparent layer positioned from the
+ * anchor's rectangle is never clipped, needs no host styling at all, and can sit anywhere
+ * (including outside and over the component).
+ *
+ * The rectangle is re-read on scroll (capture: any scroller), on resize and on DOM mutations,
+ * coalesced to ONE update per animation frame — the same budget the canvas editor works in.
+ * @param getImages - supplies the images to paint (re-read on every sync, so a caller may hand
+ *   in a live view of its own state instead of re-mounting).
+ * @param doc - the document to paint into.
+ * @returns the layer handle.
+ */
+export function mountImageOverlay(getImages: () => readonly EmbeddedImage[], doc: Document = document): ImageOverlay {
+  const view = doc.defaultView
+  const host = doc.createElement('div')
+  host.setAttribute(OVERLAY_ATTR, '1')
+  host.setAttribute('aria-hidden', 'true')
+  host.style.cssText = 'position: fixed; inset: 0; overflow: visible; pointer-events: none; z-index: ' + String(OVERLAY_Z_INDEX) + ';'
+  doc.body.appendChild(host)
+  /** One node per painted element, keyed `<image id>#<index>` (a 整组 image paints several). */
+  const nodes = new Map<string, HTMLElement>()
+  /**
+   * One image node, created on demand and kept across syncs.
+   * @param img - the image to paint.
+   * @param index - which member of the block this node belongs to.
+   * @returns the node.
+   */
+  const nodeFor = (img: EmbeddedImage, index: number): HTMLElement => {
+    const key = img.id + '#' + String(index)
+    const known = nodes.get(key)
+    if (known !== undefined) return known
+    const node = doc.createElement('div')
+    node.setAttribute(ANCHOR_IMAGE_ATTR, img.id)
+    if (index > 0) node.setAttribute('data-dsh-myskin-anchor-index', String(index))
+    node.setAttribute('data-dsh-myskin-owner', PLUGIN_ID)
+    node.style.cssText = 'position: absolute; pointer-events: none; display: none; background-repeat: no-repeat; background-size: 100% 100%; background-position: center;'
+    host.appendChild(node)
+    nodes.set(key, node)
+    return node
+  }
+  /**
+   * Write one style property only when it actually changes.
+   *
+   * Two reasons: a per-frame sync during a scroll would otherwise touch the DOM (and the
+   * mutation observer) for values that did not move, and writing the same value is what makes
+   * a self-feeding loop possible.
+   */
+  const setStyle = (node: HTMLElement, property: string, value: string): void => {
+    if (node.style.getPropertyValue(property) !== value) node.style.setProperty(property, value)
+  }
+  const sync = (): void => {
+    const images = getImages()
+    const live = new Set<string>()
+    const pageKey = currentSettingsPageKey(doc)
+    for (const img of images) {
+      const scoped = img.pageKey !== undefined && img.pageKey !== '' && img.pageKey !== pageKey
+      const targets = scoped || img.url === '' ? [] : resolveImageTargets(img, doc)
+      // A 整组 image paints the same picture on EVERY block member, so it owns one node per
+      // target — and a hidden placeholder while the block is momentarily empty.
+      const slots = Math.max(targets.length, 1)
+      for (let index = 0; index < slots; index += 1) {
+        const key = img.id + '#' + String(index)
+        live.add(key)
+        const node = nodeFor(img, index)
+        const target = targets[index]
+        if (target === undefined) { setStyle(node, 'display', 'none'); continue }
+        const rect = target.getBoundingClientRect()
+        setStyle(node, 'display', 'block')
+        setStyle(node, 'left', rect.left + (img.x || 0) + 'px')
+        setStyle(node, 'top', rect.top + (img.y || 0) + 'px')
+        setStyle(node, 'width', Math.max(1, img.w) + 'px')
+        setStyle(node, 'height', Math.max(1, img.h) + 'px')
+        setStyle(node, 'opacity', String(img.opacity ?? 1))
+        setStyle(node, 'mix-blend-mode', img.blend ?? 'normal')
+        setStyle(node, 'background-image', 'url("' + img.url + '")')
+      }
+    }
+    // Nodes whose member (or image) is gone are ours to remove.
+    for (const [key, node] of nodes) {
+      if (!live.has(key)) { node.remove(); nodes.delete(key) }
+    }
+  }
+  let frame = 0
+  const raf = (fn: () => void): number => view !== null && typeof view.requestAnimationFrame === 'function'
+    ? view.requestAnimationFrame(fn)
+    : (setTimeout(fn, 16) as unknown as number)
+  const cancelRaf = (id: number): void => {
+    if (view !== null && typeof view.cancelAnimationFrame === 'function') view.cancelAnimationFrame(id)
+    else clearTimeout(id as unknown as ReturnType<typeof setTimeout>)
+  }
+  const schedule = (): void => {
+    if (frame !== 0) return
+    frame = raf(() => { frame = 0; sync() })
+  }
+  const onScroll = (): void => { schedule() }
+  view?.addEventListener('scroll', onScroll, true)
+  view?.addEventListener('resize', onScroll)
+  const observer = typeof MutationObserver === 'undefined' ? undefined : new MutationObserver((records) => {
+    // Our own nodes write styles on every sync; observing those would be a self-feeding loop.
+    for (const record of records) {
+      const target = record.target
+      if (target instanceof Element && target.closest('[' + OVERLAY_ATTR + ']') !== null) continue
+      schedule()
+      return
+    }
+  })
+  observer?.observe(doc.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'hidden', 'style', 'aria-current'] })
+  sync()
+  return {
+    sync,
+    dispose: (): void => {
+      if (frame !== 0) { cancelRaf(frame); frame = 0 }
+      view?.removeEventListener('scroll', onScroll, true)
+      view?.removeEventListener('resize', onScroll)
+      observer?.disconnect()
+      host.remove()
+      nodes.clear()
+    },
+  }
 }
 
 /** One resolved shell-surface tint: colour plus the canvas/panel alphas. */
@@ -1114,11 +1609,17 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
   // Embedded background images: a ::after layer on each container, painted above the
   // container's background but below its content, so it's behind text and follows the
   // container's size/collapse. position/size/opacity are user-adjustable.
+  // 「组件嵌入」: painted INSIDE the anchored component — a ::after on the element the anchor
+  // resolves to, above its background and below its content, clipped by the container.
   const embedTargets = skin.canvas.images.filter((img) =>
-    img.selector !== '' && img.url !== '' && img.fallbackSelector !== undefined && img.fallbackSelector !== '',
+    imageModeOf(img) === 'embed' && img.selector !== '' && img.url !== '' && hasIdentity(img),
   )
-  for (const img of skin.canvas.images) {
-    if (img.selector === '' || img.url === '') continue
+  // 「组件锚定」: painted OUTSIDE it, on the skin's own tracked layer, so nothing about the
+  // host element's position/overflow has to change (see {@link mountImageOverlay}).
+  const anchoredImages = skin.canvas.images.filter((img) =>
+    imageModeOf(img) === 'anchor' && img.url !== '' && hasIdentity(img),
+  )
+  for (const img of embedTargets) {
     rules.push(img.selector + ' { position: relative; }')
     rules.push(img.selector + embedAfter(img))
     // The structural fallback is deliberately NOT painted directly, even when it matches
@@ -1127,37 +1628,21 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
     // wrong node. Identity is the engine's job (see the re-tag loop below), not the
     // stylesheet's.
   }
-  // Cross-document recovery: the image's own selector is the editor iframe's
-  // `[data-dsh-myskin-embed=...]` attribute, which the real page never carries.
-  // We re-tag the real element via its structural fallback selector, only when it
-  // uniquely matches (so we never tag a look-alike). The attribute is transient —
-  // React may rebuild the node (wiping it) or mount it after this apply runs — so a
-  // single shared MutationObserver keeps the unique fallback re-tagged across
-  // re-renders and late mounts until the skin is disposed.
+  // Cross-page recovery: the image's own selector is the `[data-dsh-myskin-embed=...]`
+  // attribute the editor stamps on the element it resolved, which the freshly loaded page
+  // does not carry yet. The engine re-resolves the image's ANCHOR (structural selector, a
+  // piece of copy, or a catalog landmark) and re-stamps it. The attribute is transient —
+  // React may rebuild the node (wiping it) or mount it after this apply runs — so a single
+  // shared MutationObserver retries across re-renders and late mounts until dispose.
   if (embedTargets.length > 0 && typeof document !== 'undefined' && typeof MutationObserver !== 'undefined') {
-    /** The element each image was last tagged on, used to recognise it after a rebuild. */
-    const taggedElements = new Map<string, Element>()
+    /** Every element each image is currently tagged on (a 整组 image has one per block member). */
+    const taggedElements = new Map<string, Element[]>()
     /** Its ancestor fingerprint, for when the element itself was re-created. */
     const taggedChains = new Map<string, string[]>()
-    /**
-     * Resolve a selector to the element it should target.
-     *
-     * "Exactly one match" was the old rule, and it is why an embedded image vanished
-     * after the sidebar collapsed and expanded again: for a frame React keeps both the
-     * rail and the panel mounted (two matches), and a remount can also leave the old
-     * attribute behind on a detached node. Several matches therefore prefer a *visible*
-     * one (browsers; jsdom has no layout and falls back to the first), and the first
-     * match is always better than giving up.
-     * @param selector - candidate selector.
-     * @returns the element to tag, or undefined when nothing matches.
-     */
-    const pick = (selector: string): Element | undefined => {
-      let els: Element[]
-      try { els = Array.from(document.querySelectorAll(selector)) } catch { return undefined }
-      if (els.length === 0) return undefined
-      if (els.length === 1) return els[0]
-      return els.find((el) => el.getClientRects().length > 0) ?? els[0]
-    }
+    // The picker itself is module-level ({@link pickOne}) so the editor can resolve the very
+    // same anchors for its live preview: "exactly one match" was the old rule, and it is why
+    // an embedded image vanished after the sidebar collapsed and expanded again (for a frame
+    // React keeps both the rail and the panel mounted).
     /**
      * Fingerprint of an element: `TAG.class` for the element and up to 8 ancestors.
      *
@@ -1202,6 +1687,12 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
     }
     const retag = (): void => {
       if (disposed) return
+      // While the canvas editor is open IT owns the embed tags: it previews the DRAFT, which
+      // may have moved, re-anchored or deleted an image, and re-tagging from the committed
+      // document here would silently undo that preview one DOM mutation later (the app
+      // mutates constantly, so this is not a rare race). The editor re-tags the committed
+      // images itself when it closes.
+      if (document.querySelector('[data-dsh-myskin-canvas="1"]') !== null) return
       const curKey = currentSettingsPageKey(document)
       for (const img of embedTargets) {
         // Page scoping: an image embedded on one settings page must not leak onto
@@ -1210,28 +1701,38 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
         // [data-dsh-myskin-embed=id] rule matches nothing.
         const scoped = img.pageKey !== undefined && img.pageKey !== ''
         if (scoped && img.pageKey !== curKey) {
-          const stale = document.querySelector('[data-dsh-myskin-embed="' + img.id + '"]')
-          if (stale !== null) stale.removeAttribute('data-dsh-myskin-embed')
+          for (const stale of document.querySelectorAll('[data-dsh-myskin-embed="' + img.id + '"]')) stale.removeAttribute('data-dsh-myskin-embed')
           taggedElements.delete(img.id)
           taggedChains.delete(img.id)
           continue
         }
-        const known = taggedElements.get(img.id)
-        let target = pick(img.fallbackSelector!)
+        const previous = taggedElements.get(img.id) ?? []
+        // The anchor decides (element / copy / catalog landmark / the whole block); the image's
+        // frozen structural selector and the last known node are the recovery tiers below.
+        let targets = resolveImageTargets(img, document)
         // Our element survived (possibly only hidden while the sidebar was collapsed).
-        if (target === undefined && known !== undefined && known.isConnected) target = known
+        if (targets.length === 0 && previous.length === 1 && previous[0].isConnected) targets = previous
         // It was re-created: a sidebar collapse/expand remounts the virtualized workspace
         // panel, which shifts sibling indices until the stored positional path matches
         // nothing. Re-find it by fingerprint instead — and only when that fingerprint is
         // unique, so the image can never land on a look-alike.
-        if (target === undefined) {
+        if (targets.length === 0) {
           const chain = taggedChains.get(img.id)
-          if (chain !== undefined) target = findByChain(chain)
+          const recovered = chain === undefined ? undefined : findByChain(chain)
+          if (recovered !== undefined) targets = [recovered]
         }
-        if (target === undefined) continue
-        if (target.getAttribute('data-dsh-myskin-embed') !== img.id) target.setAttribute('data-dsh-myskin-embed', img.id)
-        taggedElements.set(img.id, target)
-        taggedChains.set(img.id, chainOf(target))
+        // Take back what this image no longer owns: a row that left the block, or the anchor
+        // having moved. Without it a 整组 image keeps painting on a stale row.
+        for (const el of previous) if (!targets.includes(el)) el.removeAttribute('data-dsh-myskin-embed')
+        if (targets.length === 0) continue
+        for (const el of targets) {
+          if (el.getAttribute('data-dsh-myskin-embed') !== img.id) el.setAttribute('data-dsh-myskin-embed', img.id)
+        }
+        taggedElements.set(img.id, targets)
+        // One ancestor fingerprint identifies ONE node; a block needs none (its selector IS the
+        // identity), so the chain is kept for the single-target case alone.
+        if (targets.length === 1) taggedChains.set(img.id, chainOf(targets[0]))
+        else taggedChains.delete(img.id)
       }
     }
     retag()
@@ -1248,8 +1749,27 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
     // panel is hidden, not unmounted) and would otherwise never trigger a re-tag. Our own
     // setAttribute (data-dsh-myskin-embed) is not observed, so the observer cannot
     // self-loop.
-    mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-current', 'class', 'hidden'] })
-    cleanups.push(() => { mo.disconnect() })
+    // aria-expanded / aria-selected are in the filter because a 整组 image follows the sidebar's
+    // own kind markers: collapsing a workspace (aria-expanded toggles) changes block membership,
+    // and the tag has to follow or the picture stays on a row that is no longer a member.
+    mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-current', 'aria-expanded', 'aria-selected', 'class', 'hidden'] })
+    cleanups.push(() => {
+      mo.disconnect()
+      // The tag is how the stylesheet finds the element, so it has to go with the skin: a
+      // leftover `data-dsh-myskin-embed` keeps a disabled skin's anchor on the page and makes
+      // the NEXT apply fight a stale id (the attribute is ours, and only ours).
+      for (const img of embedTargets) {
+        for (const node of taggedElements.get(img.id) ?? []) node.removeAttribute('data-dsh-myskin-embed')
+        // Belt and braces: a node tagged before the last sync is still ours to take back.
+        for (const node of document.querySelectorAll('[data-dsh-myskin-embed="' + img.id + '"]')) node.removeAttribute('data-dsh-myskin-embed')
+      }
+    })
+  }
+
+  // 组件锚定 images: one skin-owned, pointer-transparent layer tracked to their components.
+  if (anchoredImages.length > 0 && typeof document !== 'undefined') {
+    const overlay = mountImageOverlay(() => anchoredImages, document)
+    cleanups.push(overlay.dispose)
   }
 
   // DSH paints opaque surfaces over <body>, so the wallpaper goes on <body> AND (on a

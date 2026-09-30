@@ -11,6 +11,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { Config } from './host-schema.ts'
 import { SKIN_SETTINGS_NAMESPACE } from './skin-schema.ts'
+import { registerDesignCommand, type CommandRegistryLike } from './command-brief.ts'
 
 export { Config }
 
@@ -18,8 +19,25 @@ export { Config }
 export const name = SKIN_SETTINGS_NAMESPACE
 
 /**
- * Host plugin body: nothing to compose. DSH owns the schema, the persistence
- * and the change broadcast; the browser half applies the skin after the UI
- * mounts.
+ * Host plugin body.
+ *
+ * DSH owns the schema, the persistence and the change broadcast, and the browser half applies
+ * the skin after the UI mounts — so the only thing this half contributes is the entry point
+ * users actually type: the `/dsh-myskin` command (see ./command-brief.ts).
+ *
+ * The command layer is OPTIONAL on purpose: `commands` may be absent (older DSH, a headless
+ * profile), and a registration failure must never take the skin plugin down with it — a broken
+ * optional feature is annoying, a plugin that fails to load is a broken install.
+ * @param ctx - the Host plugin context.
  */
-export function apply(): void {}
+export function apply(ctx: Context): void {
+  ctx.inject(['commands'], (scope) => {
+    try {
+      const commands = (scope as unknown as { commands?: CommandRegistryLike }).commands
+      if (commands === undefined || typeof commands.register !== 'function') return
+      registerDesignCommand(commands)
+    } catch {
+      // Never let the optional command break the skin itself.
+    }
+  })
+}

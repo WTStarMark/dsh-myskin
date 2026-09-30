@@ -54,7 +54,10 @@ export function canvasUiRules(): string {
     // the whole app on every frame.
     '[data-dsh-myskin-canvas] .dsh-myskin-panel { animation: dsh-myskin-slide 190ms var(--dsh-myskin-ease) both; transition: opacity 140ms ease, transform 140ms ease; box-shadow: -12px 0 28px -24px rgba(0, 0, 0, .65) }',
     '[data-dsh-myskin-canvas] .dsh-myskin-panel[data-open="0"] { opacity: 0; transform: translateX(16px) }',
-    '[data-dsh-myskin-canvas] .dsh-myskin-card { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; transition: background-color 140ms ease, border-color 140ms ease }',
+    // `flex: none`: a card is a block of content, not a rubber band. Without it a tall card in
+    // the height-constrained panel is squeezed (its own `overflow` drops its automatic minimum
+    // size to 0) instead of letting the panel scroll.
+    '[data-dsh-myskin-canvas] .dsh-myskin-card { flex: none; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; transition: background-color 140ms ease, border-color 140ms ease }',
     '[data-dsh-myskin-canvas] .dsh-myskin-card:hover { border-color: var(--dsw-alias-border-l3) }',
     // Hover/selection chrome: two tiny boxes, animation only on (re)mount.
     '[data-dsh-myskin-canvas] .dsh-myskin-box { animation: dsh-myskin-pop 130ms var(--dsh-myskin-ease) both }',
@@ -81,6 +84,18 @@ export function canvasUiRules(): string {
     '[data-dsh-myskin-canvas] .dsh-myskin-body { display: flex; flex-direction: column; gap: 8px; animation: dsh-myskin-fade 150ms ease-out both }',
     '[data-dsh-myskin-canvas] .dsh-myskin-field { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; min-height: 28px; padding: 0 2px; border-radius: 7px; font-size: 12px; line-height: 20px; transition: background-color 120ms ease }',
     '[data-dsh-myskin-canvas] .dsh-myskin-field:hover { background: var(--dsw-alias-bg-layer-2) }',
+    // Font list rows: each name is drawn in its own family (the list doubles as the
+    // preview). Static metrics only — this sheet never animates layout.
+    //
+    // `flex: none` + `min-height` are LOAD-BEARING, not cosmetics. A flex item with
+    // `overflow: hidden` has an automatic minimum size of ZERO, so a 224-family list inside a
+    // height-constrained column shrinks every row to its padding floor — and `overflow: hidden`
+    // then clips the 20px line box away entirely. The result: rows that scroll but render not
+    // one readable name (and, before `box-sizing`, a stray horizontal scrollbar from
+    // `width: 100%` + padding + border).
+    '[data-dsh-myskin-canvas] .dsh-myskin-fontpick { display: block; box-sizing: border-box; flex: none; width: 100%; min-height: 26px; text-align: left; padding: 3px 7px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--dsw-alias-label-primary); font-size: 12px; line-height: 20px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: background-color 120ms ease, border-color 120ms ease }',
+    '[data-dsh-myskin-canvas] .dsh-myskin-fontpick:hover { background: var(--dsw-alias-bg-layer-2); border-color: var(--dsw-alias-border-l2) }',
+    '[data-dsh-myskin-canvas] .dsh-myskin-fontpick[data-active="1"] { background: var(--dsw-alias-bg-layer-2); border-color: var(--dsw-alias-brand-primary) }',
     '[data-dsh-myskin-canvas] .dsh-myskin-empty { display: flex; flex-direction: column; gap: 8px; padding: 16px 14px; border: 1px dashed var(--dsw-alias-border-l3); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; animation: dsh-myskin-fade 160ms ease-out both }',
     // Thin scrollbar for the panel only (the app keeps its own).
     '[data-dsh-myskin-canvas] .dsh-myskin-scroll::-webkit-scrollbar { width: 8px; height: 8px }',
