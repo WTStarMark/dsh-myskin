@@ -31,10 +31,18 @@ import { mergeDeclaration, withoutDeclaration } from './skin-engine.ts'
 import type { MySkinKey } from './locales.ts'
 
 /** The kind of block a group represents (drives the label and nothing else). */
-export type GroupKind = 'workspace' | 'session' | 'tree' | 'peers'
+export type GroupKind = 'workspace' | 'session' | 'tree' | 'peers' | 'site'
 
-/** What the Inspector edits: the selected element, or its whole block. */
-export type EditScope = 'single' | 'group'
+/**
+ * What the Inspector edits.
+ *
+ *   - \`single\`: the element the user picked, addressed by its structural selector;
+ *   - \`group\`: its block — the same kind of element, reachable from here, including members
+ *     created later (this module);
+ *   - \`site\`: the same IDENTITY anywhere in the document, with no ancestor path at all — the
+ *     scope for a component a plugin renders in every view (site-scope.ts).
+ */
+export type EditScope = 'single' | 'group' | 'site'
 
 /** One block of look-alike elements the editor can edit together. */
 export interface ElementGroup {
@@ -59,6 +67,7 @@ const KIND_KEYS: Record<GroupKind, MySkinKey> = {
   session: 'groupSession',
   tree: 'groupTree',
   peers: 'groupPeers',
+  site: 'scopeSite',
 }
 
 /**
@@ -71,6 +80,28 @@ export function groupLabelKey(kind: GroupKind): MySkinKey {
 }
 
 /**
+ * The generated-class shapes DSH has shipped, which are instance-independent by construction.
+ *
+ *   0.1.x  \`_row_1abc2_34\`          — name, then a hash, then an optional index
+ *   0.2.x  \`bhn1Oq_projectRow\`      — hash, then the readable name
+ *   0.2.x  \`pI_x6G_centerCol\`       — TWO hash segments, then the readable name (current build:
+ *                                      `.pI_x6G_frame\`, \`.pI_x6G_sidebarCol\`, …)
+ *
+ * The two-segment form is listed separately because it is the one in use today and it is NOT
+ * matched by the \`hash_name\` pattern above.
+ */
+const MODULE_CLASS = /^_[A-Za-z][\w-]*_[a-z0-9]{4,}(_\d+)?$/
+/** See {@link MODULE_CLASS}. */
+const MODULE_CLASS_HASHED = /^[A-Za-z0-9]{4,}_[A-Za-z][\w-]*$|^[A-Za-z0-9]{2,}_[A-Za-z0-9]{2,}_[A-Za-z][\w-]*$/
+
+/**
+ * Classes a component flips per instance — never an identity.
+ *
+ * Both spellings occur: bare words (\`active\`) and prefixed ones (\`is-active\`, \`has-error\`).
+ */
+const STATE_CLASS = /^(is|has)[-_]|^(active|selected|disabled|open|closed|hover|focus|hidden|expanded|collapsed|current|dragging|loading|pressed)$/i
+
+/**
  * The classes that identify an element across instances.
  *
  * DSH ships CSS-module names (`_row_1abc2_34`); a plain build ships readable ones. Utility and
@@ -81,14 +112,9 @@ export function groupLabelKey(kind: GroupKind): MySkinKey {
  */
 export function stableClasses(el: Element): string[] {
   const all = Array.from(el.classList)
-  const moduleish = all.filter((name) =>
-    // 0.1.x: `_row_1abc2_34`; 0.2.x: `bhn1Oq_projectRow`. Both are generated, so both are
-    // instance-independent — and preferring them keeps stray utility classes out of the selector.
-    /^_[A-Za-z][\w-]*_[a-z0-9]{4,}(_\d+)?$/.test(name) || /^[a-z0-9]{5,}_[A-Za-z][\w-]*$/.test(name))
+  const moduleish = all.filter((name) => (MODULE_CLASS.test(name) || MODULE_CLASS_HASHED.test(name)) && !STATE_CLASS.test(name))
   if (moduleish.length > 0) return moduleish.slice(0, 3)
-  return all
-    .filter((name) => !/^(active|selected|disabled|open|closed|hover|focus|hidden|expanded|collapsed)$/i.test(name))
-    .slice(0, 3)
+  return all.filter((name) => !STATE_CLASS.test(name)).slice(0, 3)
 }
 
 /**
@@ -200,12 +226,13 @@ function treeAnchorFor(el: Element): { selector: string; kind: GroupKind; elemen
 }
 
 /**
- * Move one element's declarations onto its block.
+ * Move one element's declarations onto a wider scope (its block, or the whole site).
  *
- * Switching to 整组 has to mean "the edit I already made now covers the whole kind": the panel
- * writes only on the next field change, so without this the user toggles the scope and watches
- * nothing happen. The element's own rule is removed afterwards — its declarations live on the
- * block now, and a leftover copy would keep that one row pinned when the block changes again.
+ * Switching scope has to mean "the edit I already made now covers everything that scope names":
+ * the panel writes only on the next field change, so without this the user toggles the scope and
+ * watches nothing happen. The element's own rule is removed afterwards — its declarations live on
+ * the wide selector now, and a leftover copy would keep that one element pinned when the scope
+ * changes again.
  * @param css - the skin's rule list.
  * @param selector - the element's own selector.
  * @param blockSelector - the block selector to move the declarations to.

@@ -132,7 +132,7 @@ test('a text-anchored image lands on the page and survives a full rebuild', asyn
     canvas: { background: undefined, images: [img] },
   })
   assert.equal(doc.querySelector('span').getAttribute('data-dsh-myskin-embed'), 'e1')
-  assert.match(doc.getElementById('dsh-myskin-rule').textContent, /\[data-dsh-myskin-embed="e1"\] \{ position: relative; \}/)
+  assert.match(doc.getElementById('dsh-myskin-rule').textContent, /\[data-dsh-myskin-embed="e1"\] \{ position: relative; isolation: isolate; \}/)
   // React throws the whole subtree away: the stale structural path matches nothing, but the
   // copy the user anchored to is still on the page, so the image keeps its home.
   const rebuilt = doc.createElement('div')
@@ -156,7 +156,7 @@ test('整组 anchor: one image, every workspace row — including a row created 
     canvas: { background: undefined, images: [img] },
   })
   assert.deepEqual(ids(), ['w1', 'w2'])
-  assert.match(doc.getElementById('dsh-myskin-rule').textContent, /\[data-dsh-myskin-embed="e1"\] \{ position: relative; \}/)
+  assert.match(doc.getElementById('dsh-myskin-rule').textContent, /\[data-dsh-myskin-embed="e1"\] \{ position: relative; isolation: isolate; \}/)
   // A workspace created later: the selector already covers it, the retag loop stamps it.
   const later = doc.createElement('div')
   later.className = 'row'

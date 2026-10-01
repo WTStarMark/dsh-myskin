@@ -393,10 +393,278 @@ test('the structural fallback re-tags, but never paints directly', () => {
   // stylesheet only ever paints the transient tag; identity is re-established by the
   // engine (see the two re-tag tests below), never by the fallback path itself.
   assert.doesNotMatch(css, new RegExp(escaped + ' \\{ position: relative; \\}'))
-  assert.match(css, /\[data-dsh-myskin-embed="e1"\] \{ position: relative; \}/)
+  assert.match(css, /\[data-dsh-myskin-embed="e1"\] \{ position: relative; isolation: isolate; \}/)
   assert.match(css, /\[data-dsh-myskin-embed="e1"\]::after \{ content: ''/)
+  // The picture goes BELOW the container's content: a positive z-index painted it over the very
+  // rows it was embedded into (reported from a screenshot), and the negative one only stays inside
+  // the container because the host rule isolates it as a stacking context.
+  assert.match(css, /\[data-dsh-myskin-embed="e1"\]::after \{[^}]*z-index: -1;/)
+  assert.doesNotMatch(css, /\[data-dsh-myskin-embed="e1"\]::after \{[^}]*z-index: 1;/)
   assert.equal(doc.getElementById('target').getAttribute('data-dsh-myskin-embed'), 'e1')
   override.dispose()
+})
+
+test('a blend mode moves the image above the content — isolation would kill the blend', () => {
+  // `mix-blend-mode` blends with its BACKDROP, and `isolation: isolate` cuts that backdrop down to
+  // the container's own background: under isolation every mode blends against nothing, which is
+  // exactly the report ("the four modes feel the same"). So a real blend mode paints the image
+  // ABOVE the content, with no isolation — and `normal` keeps the picture below the rows.
+  const window = setup()
+  window.document.body.innerHTML = '<div id="root"><div id="target"></div></div>'
+  const doc = window.document
+  const base = {
+    id: 'e2',
+    selector: '[data-dsh-myskin-embed="e2"]',
+    fallbackSelector: '',
+    anchor: { kind: 'element', value: '#target' },
+    url: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+    x: 0, y: 0, w: 40, h: 20,
+  }
+  const override = engine.applySkin(fakeTheme(), {
+    enabled: true, tokens: {}, css: [], text: [], layers: [], library: [],
+    canvas: { background: undefined, images: [{ ...base, blend: 'multiply' }] },
+  })
+  const css = doc.getElementById('dsh-myskin-rule').textContent
+  assert.match(css, /\[data-dsh-myskin-embed="e2"\] \{ position: relative; \}/)
+  assert.doesNotMatch(css, /\[data-dsh-myskin-embed="e2"\] \{ position: relative; isolation: isolate; \}/)
+  assert.match(css, /\[data-dsh-myskin-embed="e2"\]::after \{[^}]*z-index: 1;[^}]*mix-blend-mode: multiply;/)
+  assert.equal(engine.embedPaintsAbove({ ...base, blend: 'multiply' }), true)
+  assert.equal(engine.embedPaintsAbove({ ...base, blend: 'normal' }), false)
+  assert.equal(engine.embedPaintsAbove(base), false, 'no blend mode = the below-content default')
+  override.dispose()
+})
+
+test('the wallpaper can anchor to the conversation instead of the viewport', () => {
+  // Default (viewport): the page carries the wallpaper with `background-attachment: fixed`, i.e.
+  // positioned against the WINDOW — folding the sidebar slides the conversation area under a
+  // background that did not move.
+  const window = setup()
+  const plain = engine.wallpaperRules(window.document, 'data:image/gif;base64,AAA')
+  assert.equal(plain.length, 1)
+  assert.match(plain[0], /^body \{/)
+  assert.match(plain[0], /background-attachment: fixed !important/)
+  // Opt-in: the conversation column paints the same image anchored to ITS OWN box (`scroll`, not
+  // `fixed`), so a sidebar fold re-centers it with no script and no resize listener.
+  const anchored = engine.wallpaperRules(window.document, 'data:image/gif;base64,AAA', undefined, 'conversation')
+  assert.equal(anchored.length, 2)
+  assert.match(anchored[1], /\[class\*="_centerCol"\], \[class~="centerCol"\] \{ background-image: url\("data:image\/gif;base64,AAA"\) !important; background-size: cover !important; background-position: center !important; background-attachment: scroll !important; \}/)
+  assert.doesNotMatch(anchored[1], /fixed/)
+  // The choice rides in `css` as a marker — no new `canvas` field, so an older Host cannot drop it.
+  const css = engine.withBackgroundAnchor(engine.withBackgroundOpacity([{ selector: '#a', rule: 'color: red' }], 0.6), 'conversation')
+  assert.equal(css.filter((rule) => rule.selector === ':root').length, 1, 'one :root entry carries both markers')
+  assert.equal(css.find((rule) => rule.selector === '#a').rule, 'color: red', 'other rules survive')
+  const skin = { canvas: { images: [] }, css }
+  assert.equal(engine.readBackgroundAnchor(skin), 'conversation')
+  assert.equal(engine.readBackgroundOpacity(skin), 0.6, 'the strength marker survives the anchor write')
+  // …and turning it off drops only that declaration.
+  const off = engine.withBackgroundAnchor(css, 'viewport')
+  assert.equal(engine.readBackgroundAnchor({ canvas: { images: [] }, css: off }), 'viewport')
+  assert.equal(off.filter((rule) => rule.selector === ':root').length, 1)
+  assert.match(off.find((rule) => rule.selector === ':root').rule, /--dsh-myskin-bg-opacity: 0.6/)
+  assert.doesNotMatch(off.find((rule) => rule.selector === ':root').rule, /--dsh-myskin-bg-anchor/)
+  assert.equal(engine.readBackgroundAnchor({ canvas: { images: [] }, css: [] }), 'viewport', 'default is the page')
+})
+
+test('the APPLIED skin honours the wallpaper anchor (the preview is not the only path)', () => {
+  // The engine had the anchor parameter and the marker reader, but its apply path never passed the
+  // anchor through: the option worked in the draw-mode preview and did NOTHING in 交互模式 — which is
+  // the only place the sidebar fold can be watched, so the whole feature looked broken (reported).
+  // This pins the CALL SITE, not the rule builder (that one is covered above).
+  const window = setup()
+  window.document.body.innerHTML = '<div class="pI_x6G_frame"><div class="pI_x6G_sidebarCol"></div><div class="pI_x6G_centerCol"></div></div>'
+  const doc = window.document
+  const url = 'data:image/gif;base64,AAA'
+  const base = { enabled: true, tokens: {}, text: [], layers: [], library: [], canvas: { background: url, images: [] } }
+  const anchored = engine.applySkin(fakeTheme(), { ...base, css: [{ selector: ':root', rule: '--dsh-myskin-bg-anchor: conversation;' }] })
+  const css = doc.getElementById('dsh-myskin-rule').textContent
+  assert.match(css, /_centerCol[^}]*background-attachment: scroll !important/)
+  assert.match(css, /body \{[^}]*background-attachment: fixed !important/, 'the page keeps its own copy')
+  anchored.dispose()
+  // Without the marker the applied skin stays viewport-anchored: `scroll` must not leak in.
+  const plain = engine.applySkin(fakeTheme(), { ...base, css: [] })
+  assert.doesNotMatch(doc.getElementById('dsh-myskin-rule').textContent, /background-attachment: scroll/)
+  plain.dispose()
+})
+
+test('an image layer override beats the blend-mode default', () => {
+  // 'auto' = the blend mode decides; 'above'/'below' = the user overriding it. The override exists
+  // because "below the content" is right for a container whose children are transparent (a sidebar
+  // list) and WRONG for one whose children are opaque cards: there the picture is painted between the
+  // container's background and its content, i.e. invisible (reported on a settings page).
+  const window = setup()
+  window.document.body.innerHTML = '<div id="target"></div>'
+  const doc = window.document
+  const base = {
+    id: 'e1',
+    selector: '[data-dsh-myskin-embed="e1"]',
+    fallbackSelector: '',
+    anchor: { kind: 'element', value: '#target' },
+    url: 'data:image/gif;base64,AAA',
+    x: 0, y: 0, w: 40, h: 20,
+  }
+  const marker = (layer) => ({ selector: '[data-dsh-myskin-embed="e1"]', rule: '--dsh-myskin-layer: ' + layer + ';' })
+  const paint = (img, css) => {
+    const override = engine.applySkin(fakeTheme(), { enabled: true, tokens: {}, css, text: [], layers: [], library: [], canvas: { images: [img] } })
+    const text = doc.getElementById('dsh-myskin-rule').textContent
+    override.dispose()
+    return text
+  }
+  // auto: the blend mode is the only thing deciding.
+  assert.match(paint(base, []), /\[data-dsh-myskin-embed="e1"\] \{ position: relative; isolation: isolate; \}/)
+  assert.match(paint({ ...base, blend: 'multiply' }, []), /\[data-dsh-myskin-embed="e1"\] \{ position: relative; \}/)
+  // explicit 内容之上 with no blend at all — the escape hatch for an opaque container.
+  const above = paint(base, [marker('above')])
+  assert.match(above, /\[data-dsh-myskin-embed="e1"\] \{ position: relative; \}/)
+  assert.doesNotMatch(above, /isolation: isolate/)
+  assert.match(above, /::after \{[^}]*z-index: 1;/)
+  // explicit 内容之下 wins over a blend mode, and the blend stays (its backdrop is just smaller).
+  const below = paint({ ...base, blend: 'screen' }, [marker('below')])
+  assert.match(below, /isolation: isolate/)
+  assert.match(below, /::after \{[^}]*z-index: -1;[^}]*mix-blend-mode: screen;/)
+  // The choice round-trips through `css` alone (no document field, so an older Host still saves it).
+  const css = engine.withImageLayer([{ selector: '#other', rule: 'color: red' }], 'e1', 'above')
+  assert.equal(engine.readImageLayer({ canvas: { images: [] }, css }, 'e1'), 'above')
+  assert.equal(css.find((rule) => rule.selector === '#other').rule, 'color: red', 'other rules survive')
+  assert.equal(engine.readImageLayer({ canvas: { images: [] }, css: engine.withImageLayer(css, 'e1', 'auto') }, 'e1'), 'auto')
+  assert.equal(engine.readImageLayer({ canvas: { images: [] }, css: [] }, 'e1'), 'auto', 'default is auto')
+})
+
+test('the edge feather dissolves the edge, grows a small halo, and never moves the picture', () => {
+  // A sticker with hard borders looks pasted on; the feather is what makes it sit down. Two things
+  // this pins, both of them reported: the picture must NOT move (an earlier version shifted the
+  // background a second time inside the already-grown pseudo-element, so every feathered picture slid
+  // towards the top-left), and the softness must be an EDGE ramp rather than a blur of the artwork.
+  const window = setup()
+  window.document.body.innerHTML = '<div id="target"></div>'
+  const doc = window.document
+  const base = {
+    id: 'e1',
+    selector: '[data-dsh-myskin-embed="e1"]',
+    fallbackSelector: '',
+    anchor: { kind: 'element', value: '#target' },
+    url: 'data:image/gif;base64,AAA',
+    x: 0, y: 0, w: 40, h: 20,
+  }
+  const paint = (img, css) => {
+    const override = engine.applySkin(fakeTheme(), { enabled: true, tokens: {}, css, text: [], layers: [], library: [], canvas: { images: [img] } })
+    const text = doc.getElementById('dsh-myskin-rule').textContent
+    override.dispose()
+    return text
+  }
+  // 24px fade → a 6px halo and a 30px ramp from the halo's border, so full opacity lands exactly
+  // 24px inside the user's box.
+  const feathered = engine.withImageFeather([], 'e1', { width: 24, soft: 0 })
+  assert.deepEqual(engine.readImageFeather({ canvas: { images: [] }, css: feathered }, 'e1'), { width: 24, soft: 0 })
+  const css = paint(base, feathered)
+  assert.match(css, /::after \{[^}]*inset: -6px;/)
+  assert.match(css, /background-position: 0px 0px;/, 'the picture does not move: the pseudo already grew')
+  assert.match(css, /background-size: 52px 32px;/, 'the picture grows by the halo on every side')
+  assert.match(css, /mask-image: linear-gradient\(to right, rgba\(0, 0, 0, 0\) 0px, /)
+  assert.match(css, /linear-gradient\(to bottom, rgba\(0, 0, 0, 0\) 0px, /)
+  assert.match(css, /#000 calc\(100% - 30px\)/)
+  assert.match(css, /mask-composite: intersect/)
+  assert.match(css, /-webkit-mask-composite: source-in/)
+  assert.match(css, /mask-repeat: no-repeat/)
+  assert.doesNotMatch(css, /filter:/, 'the artwork is never blurred — only the ramp changes')
+  // An offset picture keeps its offset.
+  const moved = paint({ ...base, x: 12, y: 7 }, feathered)
+  assert.match(moved, /background-position: 12px 7px;/)
+  // 柔化 bends the ramp from linear into a smoothstep: same width, gentler at both ends.
+  assert.match(css, /rgba\(0, 0, 0, 0\.2\) 6px/, 'the linear ramp at the first sample')
+  const soft = paint(base, engine.withImageFeather([], 'e1', { width: 24, soft: 1 }))
+  assert.match(soft, /rgba\(0, 0, 0, 0\.1\) 6px/, 'the smoothstep starts gentler')
+  assert.match(soft, /rgba\(0, 0, 0, 0\.9\) 24px/, 'and is already 0.9 near the plateau')
+  assert.match(css, /rgba\(0, 0, 0, 0\.8\) 24px/, 'while the linear ramp is only 0.8 there')
+  assert.equal(engine.readImageFeather({ canvas: { images: [] }, css: engine.withImageFeather([], 'e1', { width: 24, soft: 1 }) }, 'e1').soft, 1)
+  // Turning it off restores the plain block, and cleans up markers older versions wrote.
+  const legacy = [{ selector: '[data-dsh-myskin-embed="e1"]', rule: '--dsh-myskin-feather-blur: 4px; --dsh-myskin-feather-shape: rect;' }]
+  const off = engine.withImageFeather(legacy, 'e1', { width: 0, soft: 0 })
+  assert.deepEqual(off, [], 'the marker rule is pruned when nothing is left')
+  const plain = paint(base, off)
+  assert.match(plain, /::after \{[^}]*inset: 0;/)
+  assert.match(plain, /background-size: 40px 20px;/)
+  assert.doesNotMatch(plain, /mask-image/)
+  // The feather rides the SAME marker rule as the layer choice: one rule per image, both settings.
+  const both = engine.withImageLayer(feathered, 'e1', 'above')
+  assert.equal(both.length, 1)
+  assert.match(both[0].rule, /--dsh-myskin-layer: above/)
+  assert.match(both[0].rule, /--dsh-myskin-feather: 24px/)
+  assert.equal(engine.readImageLayer({ canvas: { images: [] }, css: both }, 'e1'), 'above')
+})
+
+test('the settings-page key prefers the dialog nav, and compares by label only', () => {
+  // Two failure modes are pinned here, both reported: a key taken from a segmented control inside the
+  // page content (so the "page" was named after a toggle), and a key that included the nav cell's
+  // POSITION (which shifts when plugins add entries) — the second one made an image embedded on a
+  // settings page disappear from that very page.
+  const window = setup()
+  const doc = window.document
+  doc.body.innerHTML = '<button aria-current="true">夜间</button><div data-shortcut-modal><button aria-current="true">账户与余额</button></div>'
+  assert.equal(engine.currentSettingsPageKey(doc), '账户与余额', 'the dialog nav wins over page content')
+  window.document.body.innerHTML = '<button aria-current="true">通用设置</button>'
+  assert.equal(engine.currentSettingsPageKey(doc), '通用设置', 'outside a dialog any nav cell still counts')
+  window.document.body.innerHTML = '<button>没有选中项</button>'
+  assert.equal(engine.currentSettingsPageKey(doc), '', 'no marked cell: no page scope')
+  assert.equal(engine.sameSettingsPage('账户与余额', '账户与余额'), true)
+  assert.equal(engine.sameSettingsPage('账户与余额@12', '账户与余额'), true, 'legacy key: label still matches')
+  assert.equal(engine.sameSettingsPage('通用设置@3', '账户与余额'), false)
+  assert.equal(engine.sameSettingsPage('', '账户与余额'), false, 'a page-less image is not scoped by this')
+})
+
+test('injected layers are created, updated, reconciled away and fully removed', () => {
+  // Decorations only ever ADD nodes we own (tagged, aria-hidden) and remove them again: that is what
+  // keeps a skin reversible while it still puts real elements on the page.
+  const window = setup()
+  const doc = window.document
+  doc.body.innerHTML = '<div id="host"><span id="app-owned">x</span></div>'
+  let layers = [{ id: 'deco-1', kind: 'div', selector: '#host', x: 10, y: 20, w: 30, h: 40, css: 'border-radius: 8px;' }]
+  const mount = engine.mountInjectedLayers(() => layers, doc)
+  const node = doc.querySelector('[data-dsh-myskin-layer="deco-1"]')
+  assert.notEqual(node, null)
+  assert.equal(node.getAttribute('aria-hidden'), 'true')
+  assert.equal(node.style.position, 'fixed', 'viewport coordinates: no cooperation needed from the container')
+  assert.equal(node.style.left, '10px')
+  assert.equal(node.style.top, '20px')
+  assert.equal(node.style.pointerEvents, 'none', 'a decoration must never eat a click')
+  assert.match(node.style.cssText, /border-radius: 8px/)
+  assert.equal(node.parentElement.id, 'host')
+  assert.equal(doc.getElementById('app-owned').isConnected, true, 'the app\'s own node was not touched')
+  assert.equal(doc.getElementById('app-owned').nextElementSibling, node, 'appended after, never before')
+  // An edit updates the SAME node (the editor drags these; re-creating would flicker).
+  layers = [{ ...layers[0], x: 99, css: 'border-radius: 2px;' }]
+  mount.sync()
+  assert.equal(mount.nodeFor('deco-1'), node, 'same node')
+  assert.equal(node.style.left, '99px')
+  assert.match(node.style.cssText, /border-radius: 2px/)
+  assert.doesNotMatch(node.style.cssText, /border-radius: 8px/)
+  // Deleting a decoration takes its node with it (the engine never has to, the editor does).
+  layers = []
+  mount.sync()
+  assert.equal(doc.querySelector('[data-dsh-myskin-layer]'), null)
+  assert.equal(doc.getElementById('app-owned').isConnected, true)
+  // Re-adding works, and dispose removes everything it owns.
+  layers = [{ id: 'deco-2', kind: 'div', selector: '#host', x: 1, y: 2, w: 3, h: 4 }]
+  mount.sync()
+  assert.notEqual(doc.querySelector('[data-dsh-myskin-layer="deco-2"]'), null)
+  mount.dispose()
+  assert.equal(doc.querySelector('[data-dsh-myskin-layer]'), null, 'no decoration survives dispose')
+  assert.equal(doc.getElementById('app-owned').isConnected, true)
+})
+
+test('a decoration made inside a settings page stays on that page', () => {
+  const window = setup()
+  const doc = window.document
+  doc.body.innerHTML = '<div id="host"></div><button aria-current="true">账户与余额</button>'
+  const layers = [{ id: 'deco-1', kind: 'div', selector: '#host', x: 0, y: 0, w: 10, h: 10, pageKey: '账户与余额' }]
+  const mount = engine.mountInjectedLayers(() => layers, doc, () => engine.currentSettingsPageKey(doc))
+  assert.notEqual(doc.querySelector('[data-dsh-myskin-layer]'), null, 'its own page')
+  doc.querySelector('button').textContent = '通用设置'
+  mount.sync()
+  assert.equal(doc.querySelector('[data-dsh-myskin-layer]'), null, 'another settings page: gone')
+  doc.querySelector('button').textContent = '账户与余额'
+  mount.sync()
+  assert.notEqual(doc.querySelector('[data-dsh-myskin-layer]'), null, 'back home it returns')
+  mount.dispose()
 })
 
 test('an embedded image is re-tagged after React rebuilds the node somewhere else', async () => {
@@ -561,6 +829,11 @@ test('the Inspector preview keeps declarations it does not own', () => {
   assert.equal(engine.withManagedDeclarations('visibility: hidden !important', ''), 'visibility: hidden !important')
   assert.equal(engine.withManagedDeclarations(undefined, ''), '')
   assert.deepEqual(engine.INSPECTOR_PROPERTIES.includes('background-size'), true)
+  // z-index is owned by the Inspector's 层级 field: a preview must be able to rewrite it, and an
+  // empty field must be able to clear it (a rule that still says `z-index: 999` wins arguments).
+  assert.ok(engine.INSPECTOR_PROPERTIES.includes('z-index'))
+  assert.equal(engine.withManagedDeclarations('z-index: 999 !important; visibility: hidden !important', 'z-index: 10 !important'), 'visibility: hidden !important; z-index: 10 !important')
+  assert.equal(engine.withManagedDeclarations('z-index: 999 !important; visibility: hidden !important', ''), 'visibility: hidden !important')
 })
 
 test('transformValue emits only the axes that actually move', () => {

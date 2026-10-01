@@ -9,7 +9,7 @@
  *     previewed live through an owned style tag.
  */
 
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { ChangeEvent, CSSProperties, KeyboardEvent as ReactKeyboardEvent, MutableRefObject, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { Button, Pill, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -17,25 +17,54 @@ import { IconClose, IconPersonalization, IconPlus, IconTrash } from './icons.ts'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
-import { imageModeOf, parseSkin, EMPTY_SKIN, type AnchorKind, type BlendMode, type CssRule, type EmbeddedImage, type ImageAnchor, type ImageMode, type NamedSkin, type SkinCanvas, type SkinSettings, type TokenOverrides } from '../skin-schema.ts'
+import { imageModeOf, parseSkin, EMPTY_SKIN, type AnchorKind, type BlendMode, type CssRule, type EmbeddedImage, type ImageAnchor, type ImageMode, type InjectedLayer, type NamedSkin, type SkinCanvas, type SkinSettings, type TokenOverrides } from '../skin-schema.ts'
 import {
   COMPOSER_PLACEHOLDER_SELECTOR, DRAFT_STYLE_ID, FONT_FACE_SELECTOR, HIDE_DECLARATION, REMOVE_DECLARATION,
   anchorTextOf, backgroundSurfaceRules, childTargetIn, currentSettingsPageKey, declarationOf, desktopFrameTint, elementLabel,
+  embedAfterRule,
+  embedHostRule,
+  parseDeclarations,
+  embedPaintsAbove,
+  featherStyle,
+  readImageFeather,
+  withImageFeather,
+  withImageMarker,
+  type BackgroundAnchor,
+  type ImageFeather,
   fontFaceRule, fontFormat, keepStylesheetLast, mergeDeclaration, mountImageOverlay, naturalDisplayOf, parentTarget, parseTransform,
-  pickElementAt, readBackgroundOpacity, removedControls, resolveImageAnchor, resolveImageTargets, selectorOf,
+  PLUGIN_ID, pickElementAt, readBackgroundAnchor, readBackgroundOpacity, readImageLayer, removedControls, resolveImageAnchor, resolveImageTargets,
+  IMAGE_PAGE_SCOPE_PROPERTY, imagePageMatches, readImagePageScope, sameSettingsPage, selectorOf,
   SNAP_THRESHOLD, snapMove, snapScale, snapTargetsFor, stepValue, surfaceTint, textHostOf, sameDeclarations,
   transformEdit, transformPreview, transformValue, wallpaperRules, withAllControlsRestored, withBackgroundOpacity,
-  withControlRestored, withManagedDeclarations, withoutDeclaration,
+  withBackgroundAnchor, withControlRestored, withImageLayer, withManagedDeclarations, withoutDeclaration,
 } from './skin-engine.ts'
 import { filterFamilies, quoteFamily, scanFonts, type FontScan } from './fonts.ts'
 import { ANCHOR_COMPONENTS, anchorKey, anchorLabel, anchorOf } from './anchors.ts'
 import { FONT_ROLES, roleFont, roleStackFor, withRoleFont, type FontRole } from './font-roles.ts'
 import { elementGroupFor, gapLength, gapOf, gapSelectorFor, groupLabelKey, moveRuleToBlock, withGapRule, type EditScope, type ElementGroup } from './groups.ts'
+import { siteScopeFor, type SiteScopeOutcome } from './site-scope.ts'
+import { stackingReport, type StackingReport } from './stacking.ts'
+import { MAX_REMEMBERED_SURFACES, currentPageSurface, hiddenInSurface, hiddenRulesFor, hiddenWhile, readRememberedSurfaces, rememberSurface, settingsOpen, settingsSurface, withAllHiddenRestored, withHiddenEverywhere, withOnlySurface, withSurfaceHidden, withVisibleWhile, type Surface } from './views.ts'
 import { canvasLooksOversized, diagnoseCanvas } from './save-report.ts'
 import { editorFrameRules, pulseWindowDragRecall, readDesktopShell } from './desktop.ts'
 import { attachWheelNudge, mountCanvasUi, setDrawCursor } from './canvas-ui.ts'
-import type { ImageOverlay, RemovedControl, SnapLine } from './skin-engine.ts'
-import { DSHSKIN_EXTENSION, packSkin, toArrayBuffer, unpackSkin } from './dshskin.ts'
+import { DOCK_ATTRIBUTE, applyDockAttribute, browserStorage, clearDockAttribute, otherDock, readDockSide, writeDockSide, type DockSide } from './dock.ts'
+import { PANEL_TABS, PANEL_TAB_LABEL, readPanelTab, writePanelTab, type PanelTab } from './panel-tabs.ts'
+import { occludedBehindPanel, sameElements } from './occlusion.ts'
+import type { ImageLayer, ImageOverlay, RemovedControl, SnapLine } from './skin-engine.ts'
+import { DSHSKIN_EXTENSION, bytesToDataUrl, packSkin, toArrayBuffer, unpackSkin } from './dshskin.ts'
+import { isAnimatedGif, isGif } from './gif.ts'
+import { diagnoseEmbeddedImage } from './image-diag.ts'
+import { VARIANT_AXES, VARIANT_LOOKS, applyVariantLook, applyVariantOption, clearVariant, optionFor, readVariantChoices } from './variants.ts'
+import { REGIONS, REGION_FIELDS, REGION_PRESETS, applyRegionPreset, clearRegionStyles, readRegionStyle, regionCount, regionSelector, writeRegionStyle } from './regions.ts'
+import type { RegionField } from './regions.ts'
+import type { ImageDiagnosis } from './image-diag.ts'
+import {
+  MARKDOWN_FIELDS, MARKDOWN_GROUPS, MARKDOWN_PRESETS, MARKDOWN_TOKENS, applyMarkdownPreset, clearMarkdownStyles,
+  clearMarkdownTokens, markdownSurfaceCount, markdownTokenSplit, readEffectiveMarkdown, readMarkdownScope, readMarkdownStyles,
+  readMarkdownTokens, withMarkdownScope, writeMarkdownStyle, writeMarkdownToken,
+} from './markdown.ts'
+import type { MarkdownField, MarkdownScope, MarkdownTokenField } from './markdown.ts'
 import type { MySkinKey } from './locales.ts'
 import { PRESETS } from './presets.ts'
 import { TOKEN_CATALOG, TOKEN_GROUP_KEYS, type TokenGroup } from './token-catalog.ts'
@@ -85,9 +114,51 @@ function centerOf(el: Element): { x: number; y: number } | undefined {
 }
 
 /**
- * `document.querySelector` that tolerates a hand-written selector.
- * @param selector - a selector that may have been typed by the user (geek mode).
- * @returns the first match, or null when it does not match or does not parse.
+ * Elements the canvas must never select: its own UI and the document roots.
+ *
+ * One predicate for the picker, the hover tracker, the parent/child buttons AND the occlusion
+ * scan (a point that only reaches our chrome and the page itself covers nothing), so the dashed
+ * outline, the click result and the traversal can never disagree.
+ *
+ * It reads `ownerDocument` rather than the global one so a test can hand it another document.
+ * @param el - candidate element.
+ * @returns true when the canvas must ignore it.
+ */
+function isOwnElement(el: Element): boolean {
+  const doc = el.ownerDocument
+  return el.getAttribute('data-dsh-myskin-ui') === '1'
+    || el.closest('[data-dsh-myskin-ui="1"]') !== null
+    || el === doc.body || el === doc.documentElement || el === doc.getElementById('root')
+}
+
+/** Longest element label the toolbar chip shows before clipping (a label can carry a text snippet). */
+const OCCLUDED_LABEL_MAX = 30
+
+/**
+ * Clip one element label to something a toolbar chip can hold.
+ * @param label - full label (tag/id/class · text).
+ * @returns the label, ellipsised past {@link OCCLUDED_LABEL_MAX} characters.
+ */
+function shortLabel(label: string): string {
+  return label.length > OCCLUDED_LABEL_MAX ? label.slice(0, OCCLUDED_LABEL_MAX - 1) + '…' : label
+}
+
+/**
+ * Name one page of the main area for the 『界面显示』 card (『本页：插件』).
+ *
+ * The page root is a big element, so the label is the same short form the canvas uses elsewhere:
+ * tag/id/class plus a snippet of its text.
+ * @param el - the page root.
+ * @returns a human-readable, length-capped name.
+ */
+function pageLabel(el: Element): string {
+  return elementLabel(el, 40)
+}
+
+/**
+ * Look one selector up, swallowing the SyntaxError a stale selector can raise.
+ * @param selector - CSS selector.
+ * @returns the first match, or null.
  */
 function safeQuery(selector: string): Element | null {
   try { return document.querySelector(selector) } catch { return null }
@@ -102,6 +173,28 @@ function safeQuery(selector: string): Element | null {
 function toNum(value: string, fallback: number): number {
   const parsed = Number(value)
   return value.trim() === '' || !Number.isFinite(parsed) ? fallback : parsed
+}
+
+/**
+ * Round to one decimal.
+ *
+ * The numbers this editor writes are pixel offsets and sizes, and `0.1px` is already far below what
+ * anyone can aim at: showing `12.340000000000001` (which a drag or a wheel nudge can produce) reads
+ * as noise, and the document stores what the field shows.
+ * @param value - the raw number.
+ * @returns the value rounded to one decimal.
+ */
+function round1(value: number): number {
+  return Math.round(value * 10) / 10
+}
+
+/**
+ * The same rounding, as the string an input displays (`0` stays `0`, not `0.0`).
+ * @param value - the raw number.
+ * @returns the display text.
+ */
+function formatOne(value: number): string {
+  return String(round1(value))
 }
 
 /** Clamp a number to [min, max]; NaN -> min. */
@@ -302,13 +395,14 @@ function closeSkinEditor(): void {
   editorHost.container.remove()
   editorHost = undefined
 }
-function openSkinEditor(initial: SkinSettings, t: (k: MySkinKey) => string, onCommit: (next: SkinSettings) => Promise<PersistReport>, onClose: () => void, onPersistStrength: (canvas: SkinCanvas, css: CssRule[]) => Promise<PersistReport>): void {
+function openSkinEditor(theme: ThemeRuntime, initial: SkinSettings, t: (k: MySkinKey) => string, onCommit: (next: SkinSettings) => Promise<PersistReport>, onClose: () => void, onPersistStrength: (canvas: SkinCanvas, css: CssRule[]) => Promise<PersistReport>): void {
   closeSkinEditor()
   const container = document.createElement('div')
   document.body.appendChild(container)
   editorHost = { root: createRoot(container), container }
   editorHost.root.render(
     <SkinCanvas
+      theme={theme}
       initial={initial}
       t={t}
       onPersistStrength={onPersistStrength}
@@ -536,7 +630,7 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
       </div>
 
       <div style={lastRowStyle}>
-        <Button style={btnBase} variant="outline" icon={<IconPersonalization size={16} />} onClick={() => { close?.(); openSkinEditor(skin, t, (next) => persistNow(next), () => {}, (canvas, css) => persistStrength(canvas, css)) }}>{t('edit')}</Button>
+        <Button style={btnBase} variant="outline" icon={<IconPersonalization size={16} />} onClick={() => { close?.(); openSkinEditor(theme, skin, t, (next) => persistNow(next), () => {}, (canvas, css) => persistStrength(canvas, css)) }}>{t('edit')}</Button>
         <Button style={btnBase} variant="outline" onClick={onPreview}>{t('preview')}</Button>
         <Button style={btnBase} onClick={applyNow}>{t('apply')}</Button>
         <Button style={btnBase} variant="ghost" onClick={reset}>{t('reset')}</Button>
@@ -631,6 +725,95 @@ const FONT_SUGGESTIONS: readonly string[] = [
   'cursive',
 ]
 
+/**
+ * Data-URL budget for an ANIMATED image.
+ *
+ * Bigger than {@link MAX_DATA_URL_LENGTH} on purpose: the still-image path gets its size down by
+ * re-encoding, and re-encoding a GIF keeps exactly one frame — so for an animation the choice is
+ * "store more bytes" or "lose the movement". Up to here the movement wins (the panel says the
+ * document is heavier), past it the caller is TOLD that only the first frame survived.
+ */
+const MAX_ANIMATED_URL_LENGTH = 4_000_000
+
+/** What one picked picture turned into. */
+interface PickedImage {
+  /** The data URL to store ('' when the file could not be read). */
+  readonly url: string
+  /** True when the file was an animated GIF (whether or not the animation survived). */
+  readonly animated: boolean
+  /** True when an animated GIF had to be flattened to its first frame. */
+  readonly stilled: boolean
+  /** The picture's own pixel size (0 when it could not be measured). */
+  readonly width: number
+  readonly height: number
+}
+
+/**
+ * Read one picked picture, keeping an animated GIF alive whenever it can.
+ *
+ * A canvas has a single frame, so {@link readImageFile} is the right path for a still picture and
+ * the wrong one for an animation: the GIF is therefore embedded byte-for-byte as its own
+ * `image/gif` data URL — no downscaling, no re-encoding, animation intact (which is also why the
+ * size ceiling is the only thing that can still stop it).
+ * @param file - the picked file.
+ * @param maxEdge - longest edge the STILL path downscales to.
+ * @param quality - WebP quality the STILL path encodes with.
+ * @returns the data URL plus what happened to the animation.
+ */
+async function readPickedImage(file: File, maxEdge = MAX_IMAGE_EDGE, quality = 0.9): Promise<PickedImage> {
+  // Only the header is read for a non-GIF: pulling a 20 MB photo into memory just to look at its
+  // first bytes would double the work of every ordinary embed.
+  let animated = false
+  let bytes = new Uint8Array(0)
+  try {
+    const head = new Uint8Array(await file.slice(0, 16).arrayBuffer())
+    if (isGif(head)) {
+      bytes = new Uint8Array(await file.arrayBuffer())
+      animated = isAnimatedGif(bytes)
+    }
+  } catch {
+    animated = false
+  }
+  if (animated) {
+    const url = bytesToDataUrl(bytes, 'image/gif')
+    // The header carries the logical screen size: no decode needed to know the shape.
+    const size = { width: bytes[6] | (bytes[7] << 8), height: bytes[8] | (bytes[9] << 8) }
+    if (url.length <= MAX_ANIMATED_URL_LENGTH) return { url, animated: true, stilled: false, ...size }
+    const still = await readImageFile(file, maxEdge, quality)
+    return { url: still.url, animated: true, stilled: true, width: still.width, height: still.height }
+  }
+  const still = await readImageFile(file, maxEdge, quality)
+  return { url: still.url, animated: false, stilled: false, width: still.width, height: still.height }
+}
+
+/** Box a freshly embedded picture starts in (it is draggable and resizable afterwards). */
+const EMBED_BOX_WIDTH = 320
+/** @see EMBED_BOX_WIDTH */
+const EMBED_BOX_HEIGHT = 240
+
+/**
+ * The starting display size of an embed: the picture's own shape, fitted into the embed box.
+ *
+ * A fixed 320×200 stretched whatever was dropped in — an animated GIF especially, where the
+ * squashed movement is the first thing the user sees. Never upscales: a 64×64 sticker stays 64×64.
+ * @param width - natural width in pixels (0 when unknown).
+ * @param height - natural height in pixels (0 when unknown).
+ * @returns the box to start from.
+ */
+function embedSizeFor(width: number, height: number): { w: number; h: number } {
+  if (width <= 0 || height <= 0) return { w: EMBED_BOX_WIDTH, h: EMBED_BOX_HEIGHT }
+  const scale = Math.min(1, EMBED_BOX_WIDTH / width, EMBED_BOX_HEIGHT / height)
+  return { w: Math.max(24, Math.round(width * scale)), h: Math.max(24, Math.round(height * scale)) }
+}
+
+/**
+ * The size of a data URL in MB, for the one-line report the panel shows.
+ * @param url - the data URL.
+ * @returns e.g. `1.4 MB`.
+ */
+function dataUrlSize(url: string): string {
+  return (Math.round((url.length / 1024 / 1024) * 10) / 10).toFixed(1) + ' MB'
+}
 /** Longest edge a stored skin image is downscaled to (keeps the settings document small). */
 const MAX_IMAGE_EDGE = 2048
 /** Longest edge for the page wallpaper: it covers the viewport, so 2048 is waste. */
@@ -648,16 +831,22 @@ const MAX_DATA_URL_LENGTH = 1_500_000
  * @param file - the picked image.
  * @returns the data URL (empty when it cannot be made to fit) and whether it needed shrinking.
  */
-async function readBoundedImage(file: File): Promise<{ url: string; compressed: boolean }> {
-  const first = await readImageFile(file, MAX_WALLPAPER_EDGE, 0.85)
-  if (first === '') return { url: '', compressed: false }
-  if (first.length <= MAX_DATA_URL_LENGTH) return { url: first, compressed: false }
+async function readBoundedImage(file: File): Promise<{ url: string; compressed: boolean; animated: boolean; stilled: boolean }> {
+  // An animated wallpaper is a GIF too: same rule as the embedded pictures — keep the movement when
+  // the document can afford it, and say so when it cannot.
+  const picked = await readPickedImage(file, MAX_WALLPAPER_EDGE, 0.85)
+  if (picked.animated && picked.url !== '') {
+    return { url: picked.url, compressed: false, animated: true, stilled: picked.stilled }
+  }
+  const first = (await readImageFile(file, MAX_WALLPAPER_EDGE, 0.85)).url
+  if (first === '') return { url: '', compressed: false, animated: false, stilled: false }
+  if (first.length <= MAX_DATA_URL_LENGTH) return { url: first, compressed: false, animated: false, stilled: false }
   const steps: ReadonlyArray<readonly [number, number]> = [[1280, 0.8], [960, 0.72]]
   for (const [edge, quality] of steps) {
-    const next = await readImageFile(file, edge, quality)
-    if (next !== '' && next.length <= MAX_DATA_URL_LENGTH) return { url: next, compressed: true }
+    const next = (await readImageFile(file, edge, quality)).url
+    if (next !== '' && next.length <= MAX_DATA_URL_LENGTH) return { url: next, compressed: true, animated: false, stilled: false }
   }
-  return { url: '', compressed: true }
+  return { url: '', compressed: true, animated: false, stilled: false }
 }
 
 /**
@@ -665,28 +854,31 @@ async function readBoundedImage(file: File): Promise<{ url: string; compressed: 
  * @param file - the picked image file.
  * @param maxEdge - longest edge after downscaling.
  * @param quality - WebP quality used when downscaling.
- * @returns the data URL to store ('' when the file could not be read).
+ * @returns the data URL to store ('' when the file could not be read) and the picture's own size,
+ *   so a fresh embed can start at the right shape instead of in a fixed 320×200 box.
  */
-function readImageFile(file: File, maxEdge = MAX_IMAGE_EDGE, quality = 0.9): Promise<string> {
+function readImageFile(file: File, maxEdge = MAX_IMAGE_EDGE, quality = 0.9): Promise<{ url: string; width: number; height: number }> {
   return new Promise((resolve) => {
     const reader = new FileReader()
-    reader.onerror = () => resolve('')
+    const failed = { url: '', width: 0, height: 0 }
+    reader.onerror = () => resolve(failed)
     reader.onload = () => {
       const url = String(reader.result ?? '')
-      if (url === '') { resolve(''); return }
+      if (url === '') { resolve(failed); return }
       const image = new Image()
-      image.onerror = () => resolve(url)
+      image.onerror = () => resolve({ url, width: 0, height: 0 })
       image.onload = () => {
+        const natural = { width: image.naturalWidth, height: image.naturalHeight }
         const edge = Math.max(image.naturalWidth, image.naturalHeight)
-        if (edge <= maxEdge || typeof document === 'undefined') { resolve(url); return }
+        if (edge <= maxEdge || typeof document === 'undefined') { resolve({ url, ...natural }); return }
         const scale = maxEdge / edge
         const target = document.createElement('canvas')
         target.width = Math.max(1, Math.round(image.naturalWidth * scale))
         target.height = Math.max(1, Math.round(image.naturalHeight * scale))
         const context = target.getContext('2d')
-        if (context === null) { resolve(url); return }
+        if (context === null) { resolve({ url, ...natural }); return }
         context.drawImage(image, 0, 0, target.width, target.height)
-        try { resolve(target.toDataURL('image/webp', quality)) } catch { resolve(url) }
+        try { resolve({ url: target.toDataURL('image/webp', quality), ...natural }) } catch { resolve({ url, ...natural }) }
       }
       image.src = url
     }
@@ -694,7 +886,36 @@ function readImageFile(file: File, maxEdge = MAX_IMAGE_EDGE, quality = 0.9): Pro
   })
 }
 
+/**
+ * Width of the docked panel, in px.
+ *
+ * The frame rules carry the same number as their CSS fallback, and the page inset is measured from
+ * the live panel — this constant is only what the editor uses before the first measurement.
+ */
+const PANEL_WIDTH = 340
+
+/** Common stacking values offered as one-click buttons next to the z-index field. */
+const Z_INDEX_PRESETS: readonly number[] = [0, 10, 100, 1000]
+
+/**
+ * How many surfaces the 『界面显示』 card lists (settings + current page + remembered ones).
+ *
+ * The remembered list is capped: the panel is a tool, not a browser history, and a long list would
+ * push the fields it exists to serve off the screen.
+ */
+const MAX_SURFACE_ROWS = 6
+
+/**
+ * How many outlines the canvas draws for the elements a scope covers.
+ *
+ * A 全站 identity can name dozens of elements; outlining the first screenful says "it is everywhere"
+ * without turning the page into a grid of boxes, and the exact number is on the scope button.
+ */
+const PEER_OUTLINE_MAX = 24
+
 interface CanvasProps {
+  /** The DSH theme registry: the editor previews the draft's TOKENS through it (see the token effect). */
+  theme: ThemeRuntime
   initial: SkinSettings
   onClose: () => void
   /** Persist the draft and STAY in the editor (「保存」). */
@@ -707,8 +928,10 @@ interface CanvasProps {
 }
 
 /** Full-screen canvas editor over the live DSH DOM (transparent overlay). */
-function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }: CanvasProps): ReactNode {
+function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStrength, t }: CanvasProps): ReactNode {
   const [draft, setDraft] = useState<SkinSettings>(() => parseSkin(initial))
+  /** Signature of the draft's tokens: what the live token preview has to react to. */
+  const tokenKey = Object.entries(draft.tokens).map(([name, modes]) => name + ':' + modes.light + '/' + modes.dark).join(';')
   const [selected, setSelected] = useState<Element | undefined>(undefined)
   const [mode, setMode] = useState<'edit' | 'interact'>('edit')
   const [showTokens, setShowTokens] = useState(false)
@@ -717,8 +940,57 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
   const [flash, setFlash] = useState<string | undefined>(undefined)
   /** Element under the pointer in edit mode: the dashed "you will select this" outline. */
   const [hover, setHover] = useState<Element | undefined>(undefined)
-  /** The right panel can be folded away to look at the whole page while drawing. */
+  /** The panel can be folded away to look at the whole page while drawing. */
   const [panelOpen, setPanelOpen] = useState(true)
+  /**
+   * Which side the panel — and the page inset that follows it — docks to.
+   *
+   * Remembered in browser storage, NOT in the skin document: it says something about this
+   * machine's plugins, not about the skin, so it must not need a Host schema to change (see
+   * dock.ts). An element pinned to the window edge does not move when the page is inset, and
+   * docking the chrome to the other side is what makes such a component reachable again.
+   */
+  const [dock, setDock] = useState<DockSide>(() => readDockSide(browserStorage()))
+  /** Elements the open panel is currently covering (see occlusion.ts) — normally none. */
+  const [occluded, setOccluded] = useState<readonly Element[]>([])
+  /**
+   * The embedded image the canvas is editing, when one is selected.
+   *
+   * Images used to have no selection at all: their drag box was painted on top of whatever element
+   * was selected, so the page showed two overlapping selections and the panel showed two sets of
+   * settings. An image is now selected the same way a component is — one at a time, with the image
+   * taking precedence — and the element selection is kept (hidden) only as the source for
+   * 「用选中元素」/「取选中文字」.
+   */
+  const [selectedImage, setSelectedImage] = useState<string | undefined>(undefined)
+  /** Latest image selection, for the document-level key handler. */
+  const selectedImageRef = useRef<string | undefined>(undefined)
+  /**
+   * Which kind of edit the panel is showing (see {@link PANEL_TABS}).
+   *
+   * One tab per kind of OBJECT — a component, an image, a piece of copy, the markdown output, the page
+   * look — instead of one column holding all five. Remembered across sessions like the dock side.
+   */
+  const [panelTab, setPanelTab] = useState<PanelTab>(() => readPanelTab(browserStorage()))
+
+  useEffect(() => { writePanelTab(browserStorage(), panelTab) }, [panelTab])
+  /**
+   * The page the main area is showing right now (see views.ts) — 『对话』, 『插件』, …
+   *
+   * Derived from the page's own markup, and kept fresh by the scan below rather than by a render:
+   * navigating is the app's state, nothing about it mutates this component.
+   */
+  const [pageView, setPageView] = useState<Surface | undefined>(() => currentPageSurface(document, pageLabel))
+  /** Whether the settings surface is mounted right now (『你在这里』). */
+  const [inSettings, setInSettings] = useState(() => settingsOpen(document))
+  /**
+   * The pages the editor has already described — the 『常用』 rows.
+   *
+   * A page marker can only be derived from a mounted page, so the catalog is built by walking the
+   * app; remembering it is what turns 「本页」 into a fixed list you can toggle without navigating
+   * there again.
+   */
+  const [knownPages, setKnownPages] = useState<Surface[]>(() => readRememberedSurfaces(browserStorage()))
   /** 还原默认 is destructive to the draft, so it asks once before acting. */
   const [confirmReset, setConfirmReset] = useState(false)
   /** Bumped on every pick so the selection box remounts and replays its landing animation. */
@@ -758,18 +1030,32 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [selected, selectionEpoch],
   )
-  /** The selector every edit is written to — the block's when 整组 is on and there is one. */
+  /**
+   * The element's 全站 identity — the selector that reaches the same component in EVERY view.
+   *
+   * Recomputed with the selection for the same reason {@link group} is (it queries the document),
+   * and it carries either the scope or the reason the element has none: a disabled button without
+   * a reason is a dead end (see site-scope.ts).
+   */
+  const site = useMemo<SiteScopeOutcome | undefined>(
+    () => (selected === undefined ? undefined : siteScopeFor(selected, document)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selected, selectionEpoch],
+  )
+  /** The 全站 selector, when this selection has one. */
+  const siteScope = site !== undefined && site.ok ? site.scope : undefined
+  /**
+   * The selector every edit is written to: the element itself, its block (整组) or the same
+   * identity everywhere (全站).
+   *
+   * A scope that cannot be resolved for THIS selection falls back to the element — and the panel
+   * says why that scope is unavailable, rather than writing somewhere the user did not ask for.
+   */
   const activeSelector = scope === 'group' && group !== undefined
     ? group.selector
-    : (selected === undefined ? '' : selectorOf(selected))
-  /**
-   * Switch the edit scope, carrying what is already styled onto the block.
-   *
-   * 整组 means "the edit I already made now covers the whole kind", and the panel only writes on
-   * the NEXT field change — so without moving the declarations here, toggling the scope looks
-   * like it did nothing at all (exactly the report). One snapshot, so Ctrl+Z takes it back.
-   * @param next - the scope to switch to.
-   */
+    : scope === 'site' && siteScope !== undefined
+      ? siteScope.selector
+      : (selected === undefined ? '' : selectorOf(selected))
   /**
    * The selector that targets the space BETWEEN the block's members, when they are siblings.
    *
@@ -794,14 +1080,90 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
     if (!gapEditRef.current) { snapshot(); gapEditRef.current = true }
     setDraft((prev) => ({ ...prev, css: withGapRule(prev.css, gapSelector, value) }))
   }
+  /**
+   * Switch the edit scope, carrying what is already styled onto the wider selector.
+   *
+   * 整组 / 全站 mean "the edit I already made now covers everything this scope names", and the
+   * panel only writes on the NEXT field change — so without moving the declarations here, toggling
+   * the scope looks like it did nothing at all (exactly the report). One snapshot, so Ctrl+Z takes
+   * it back.
+   * @param next - the scope to switch to.
+   */
   const changeScope = (next: EditScope): void => {
     if (next === scope) return
     setScope(next)
-    if (next !== 'group' || group === undefined || selected === undefined) return
+    if (selected === undefined) return
+    const wide = next === 'group' ? group?.selector : next === 'site' ? siteScope?.selector : undefined
+    if (wide === undefined) return
     const own = selectorOf(selected)
-    if (own === group.selector) return
+    if (own === wide) return
     snapshot()
-    setDraft((prev) => ({ ...prev, css: moveRuleToBlock(prev.css, own, group.selector) }))
+    setDraft((prev) => ({ ...prev, css: moveRuleToBlock(prev.css, own, wide) }))
+  }
+  /**
+   * Hide or show the selected component in one surface (『界面显示』 card).
+   *
+   * The rule is written against the component's 全站 identity, not against the element selector:
+   * the whole point is that the surfaces mount their own instance (or paint one global node), so a
+   * structural selector would only ever reach the copy the user happens to be looking at. No
+   * identity → nothing to write, and the card says why instead of pretending.
+   * @param view - the surface to change.
+   * @param hidden - true to hide the component there, false to show it again.
+   */
+  const setSurfaceVisibility = (surface: Surface, hidden: boolean): void => {
+    if (siteScope === undefined) return
+    snapshot()
+    setDraft((prev) => ({
+      ...prev,
+      css: hidden
+        ? withSurfaceHidden(prev.css, surface, siteScope.selector, true)
+        : withVisibleWhile(prev.css, surface, siteScope.selector, surfaces),
+    }))
+  }
+  /**
+   * Preset 「只在本页显示」: keep it here, hide it everywhere else.
+   *
+   * One inverted rule instead of one rule per known surface — pages the editor has never opened
+   * are covered too, which is the whole reason this is a preset and not a row.
+   * @param surface - the page to keep it on.
+   */
+  const keepOnlySurface = (surface: Surface): void => {
+    if (siteScope === undefined) return
+    snapshot()
+    setDraft((prev) => ({ ...prev, css: withOnlySurface(prev.css, surface, siteScope.selector, surfaces) }))
+  }
+  /** Preset 「到处都不显示」: one blunt rule, no surface in the selector. */
+  const hideEverywhere = (): void => {
+    if (siteScope === undefined) return
+    snapshot()
+    setDraft((prev) => ({ ...prev, css: withHiddenEverywhere(prev.css, siteScope.selector) }))
+  }
+  /**
+   * Add one declaration to the element's rule (the 『设为 relative』 button behind the z-index
+   * field). Merged, not replaced: whatever the panel and the user already wrote stays.
+   * @param selector - the rule to edit.
+   * @param declaration - e.g. `position: relative !important`.
+   */
+  const addDeclaration = (selector: string, declaration: string): void => {
+    snapshot()
+    setDraft((prev) => {
+      const existing = prev.css.find((entry) => entry.selector === selector)?.rule
+      const rest = prev.css.filter((entry) => entry.selector !== selector)
+      return { ...prev, css: [...rest, { selector, rule: mergeDeclaration(existing, declaration) }] }
+    })
+  }
+  /**
+   * The undo for 「我把所有显示都关了」.
+   *
+   * Hiding a component everywhere takes it off the canvas, so the toggle that did it is no longer
+   * reachable by clicking the page: this button (in the panel, which is still open) and the
+   * recycle bin are the two ways back. Both remove exactly the \`display\` declarations that hide
+   * this component — every surface, including rules written by an older build.
+   */
+  const restoreAllHidden = (): void => {
+    if (siteScope === undefined) return
+    snapshot()
+    setDraft((prev) => ({ ...prev, css: withAllHiddenRestored(prev.css, siteScope.selector) }))
   }
   /**
    * The images the COMMITTED document carries.
@@ -817,6 +1179,16 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
   const [, bumpHistory] = useState(0)
   const draftRef = useRef(draft)
   useEffect(() => { draftRef.current = draft }, [draft])
+  useEffect(() => { selectedImageRef.current = selectedImage }, [selectedImage])
+  // Picking an image on the canvas opens the image tab: the panel follows the object being edited.
+  useEffect(() => {
+    if (selectedImage !== undefined) setPanelTab('image')
+  }, [selectedImage])
+  // An image that disappears (deleted, undone) must not keep the selection: the image chrome would
+  // step aside for a box that no longer exists, leaving the page with NO selection at all.
+  useEffect(() => {
+    if (selectedImage !== undefined && !draft.canvas.images.some((img) => img.id === selectedImage)) setSelectedImage(undefined)
+  }, [draft.canvas.images, selectedImage])
   const pastRef = useRef<SkinSettings[]>([])
   const futureRef = useRef<SkinSettings[]>([])
   /** Durable-write status shown in the toolbar (edits are drafts until applied). */
@@ -887,7 +1259,7 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
       setHint(undefined)
       setFlash(undefined)
       setSelectionEpoch((n) => n + 1)
-      setSelected(hitTest(e.clientX, e.clientY))
+      selectElement(hitTest(e.clientX, e.clientY))
     }
     document.addEventListener('pointerdown', onPointerDown, true)
     document.addEventListener('click', onClick, true)
@@ -905,9 +1277,69 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
   // still fits. Everything added here is removed on unmount.
   const barRef = useRef<HTMLDivElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
+  /** The live inset measurement; re-run whenever the layout moves (see the dock effect below). */
+  const measureRef = useRef<() => void>(() => {})
+
+  // Publish the dock side where the frame rules read it — ONE attribute on <html> — and remember
+  // it.
+  //
+  // A LAYOUT effect on purpose: the attribute decides which edge the page gives up, so it has to
+  // flip inside the same commit that moves the panel. As a passive effect the app would paint one
+  // frame with the panel on the new side and the margin still on the old one — a 340px jump — and
+  // on mount it would briefly cover the very components this feature exists for. It is also
+  // declared before the mount effect below, so the attribute is set when the frame stylesheet
+  // lands.
+  useLayoutEffect(() => {
+    applyDockAttribute(document, dock)
+    writeDockSide(browserStorage(), dock)
+    measureRef.current()
+    pulseWindowDragRecall(document)
+  }, [dock])
+
+  // Is the open panel covering something?
+  //
+  // The app's own layout never is — the page gives up exactly the panel's width — but an element
+  // pinned to the window edge (`position: fixed`, which is how a plugin that binds to a side is
+  // written) does not move with the body and ends up underneath: the picker cannot reach it and
+  // every edit happens out of sight. When that is detected the toolbar offers the one-click fix
+  // (dock the other way). Scanned on a slow timer — never per frame — and only while the panel is
+  // actually open; the comparison keeps a steady answer from re-rendering the toolbar forever.
+  useEffect(() => {
+    if (!panelOpen) {
+      setOccluded((prev) => (prev.length === 0 ? prev : []))
+      return
+    }
+    let frame = 0
+    const scan = (): void => {
+      frame = 0
+      const panel = panelRef.current
+      if (panel === null) return
+      const found = occludedBehindPanel(panel.getBoundingClientRect(), document, isOwnElement)
+      setOccluded((prev) => (sameElements(prev, found) ? prev : found))
+      // Same cadence, same reason: which page is open, and whether the settings dialog is up, are
+      // the APP's state — nothing about them re-renders this component. The 『界面显示』 rows and
+      // the 「当前界面」 line have to describe the page the user is actually on, or they mislead.
+      const nextPage = currentPageSurface(document, pageLabel)
+      setPageView((prev) => (prev?.id === nextPage?.id && prev?.label === nextPage?.label ? prev : nextPage))
+      if (nextPage !== undefined) {
+        setKnownPages((prev) => (prev.some((entry) => entry.id === nextPage.id) ? prev : rememberSurface(browserStorage(), prev, nextPage)))
+      }
+      const nextSettings = settingsOpen(document)
+      setInSettings((prev) => (prev === nextSettings ? prev : nextSettings))
+    }
+    const schedule = (): void => { if (frame === 0) frame = requestAnimationFrame(scan) }
+    const timer = window.setInterval(schedule, 1500)
+    schedule()
+    return () => {
+      window.clearInterval(timer)
+      if (frame !== 0) cancelAnimationFrame(frame)
+    }
+  }, [panelOpen, dock, mode, selectionEpoch])
+
   useEffect(() => {
     const root = document.documentElement
     const priorStyle = root.getAttribute('style')
+    const priorDock = root.getAttribute(DOCK_ATTRIBUTE)
     const shell = readDesktopShell(document)
     const tag = document.createElement('style')
     tag.id = 'dsh-myskin-frame'
@@ -923,8 +1355,14 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
       const bar = barRef.current
       const panel = panelRef.current
       root.style.setProperty('--dsh-myskin-inset-top', Math.round(bar === null ? 48 : bar.getBoundingClientRect().height) + 'px')
-      root.style.setProperty('--dsh-myskin-inset-right', Math.round(panel === null ? 340 : panel.getBoundingClientRect().width) + 'px')
+      // BOTH sides carry the measured width: the frame rules read only the docked one
+      // (`--dsh-myskin-inset-x`, see desktop.ts), and writing both keeps the single frame that
+      // flips the side correct without waiting for another measurement.
+      const width = Math.round(panel === null ? PANEL_WIDTH : panel.getBoundingClientRect().width) + 'px'
+      root.style.setProperty('--dsh-myskin-inset-left', width)
+      root.style.setProperty('--dsh-myskin-inset-right', width)
     }
+    measureRef.current = measure
     measure()
     const observer = new ResizeObserver(measure)
     if (barRef.current !== null) observer.observe(barRef.current)
@@ -936,6 +1374,9 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
       unmountUi()
       tag.remove()
       setDrawCursor(document, false)
+      // The dock attribute goes back to what it was before the editor opened (normally: absent).
+      if (priorDock === null) clearDockAttribute(document)
+      else root.setAttribute(DOCK_ATTRIBUTE, priorDock)
       if (priorStyle === null) root.removeAttribute('style')
       else root.setAttribute('style', priorStyle)
       pulseWindowDragRecall(document)
@@ -953,7 +1394,7 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
     const rules: string[] = []
     if (draft.canvas.background !== undefined && draft.canvas.background !== '') {
       const opacity = readBackgroundOpacity(draft)
-      rules.push(...wallpaperRules(document, draft.canvas.background, surfaceTint(document, opacity, desktopFrameTint(document))))
+      rules.push(...wallpaperRules(document, draft.canvas.background, surfaceTint(document, opacity, desktopFrameTint(document)), readBackgroundAnchor(draft)))
       rules.push(...backgroundSurfaceRules(document, opacity, desktopFrameTint(document)))
     }
     for (const { selector, rule } of draft.css) {
@@ -961,9 +1402,17 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
     }
     for (const img of draft.canvas.images) {
       if (img.selector !== '' && img.url !== '') {
-        rules.push(img.selector + ' { position: relative; }')
-        const blendCss = img.blend !== undefined && img.blend !== 'normal' ? ' mix-blend-mode: ' + img.blend + ';' : ''
-        rules.push(img.selector + '::after { content: ""; position: absolute; inset: 0; background-image: url("' + img.url + '"); background-repeat: no-repeat; background-position: ' + img.x + 'px ' + img.y + 'px; background-size: ' + img.w + 'px ' + img.h + 'px; opacity: ' + (img.opacity ?? 1) + '; pointer-events: none; z-index: 1;' + blendCss + ' }')
+        // Same declarations the engine writes for the committed skin — the preview must never tell
+        // a different story than saving does. A blend mode needs the page as its backdrop, so it
+        // moves the layer above the content; `normal` keeps the picture below the rows and buttons.
+        // The engine builds the declaration block; the preview must never tell a different story
+        // than saving does — a second copy of this CSS in the editor is how that happened twice.
+        // A blend mode needs the page as its backdrop, so it moves the layer above the content;
+        // `normal` keeps the picture below the rows and buttons; the feather widens the layer.
+        const above = embedPaintsAbove(img, readImageLayer(draft, img.id))
+        const feather = readImageFeather(draft, img.id)
+        rules.push(embedHostRule(img.selector, above))
+        rules.push(img.selector + embedAfterRule(img, above, feather))
       }
     }
     // A control restored from the recycle bin while the COMMITTED document still removes
@@ -1004,21 +1453,23 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
   /** The ids the 组件锚定 preview layer has to carry (mount key: only a real change remounts). */
   const anchorImageIds = draft.canvas.images.filter((img) => imageModeOf(img) === 'anchor').map((img) => img.id).join(',')
 
-  // Keep the real page stamped with the DRAFT's anchors while the editor is open.
-  //
-  // The engine does this for the committed document, but an image the user just anchored (or
-  // re-anchored) has to appear in the preview first: that is what makes 「锚定」 something you
-  // can see before saving — and what removes the tag from the element an image was just
-  // moved away from.
-  useEffect(() => {
+  /**
+   * Stamp the DRAFT's 组件嵌入 images onto the real page (and take stale tags off).
+   *
+   * The stylesheet paints these images through `[data-dsh-myskin-embed="<id>"]`, so the tag IS the
+   * identity: it has to exist on whatever node currently plays the container. Reads the draft from
+   * a ref rather than from this render's closure because a MutationObserver calls it later.
+   */
+  const stampDraftImages = (): void => {
+    const images = draftRef.current.canvas.images
     // 组件锚定 images are painted by the overlay below, not by a rule on the anchor element:
     // they must NOT carry the tag (an image that switched mode has to give it back).
-    const live = new Set(draft.canvas.images.filter((img) => imageModeOf(img) === 'embed').map((img) => img.id))
+    const live = new Set(images.filter((img) => imageModeOf(img) === 'embed').map((img) => img.id))
     for (const node of Array.from(document.querySelectorAll('[data-dsh-myskin-embed]'))) {
       const id = node.getAttribute('data-dsh-myskin-embed') ?? ''
       if (!live.has(id)) node.removeAttribute('data-dsh-myskin-embed')
     }
-    for (const img of draft.canvas.images) {
+    for (const img of images) {
       if (imageModeOf(img) !== 'embed') continue
       // A 整组 image belongs on EVERY member of its block (and on the members created later —
       // the block is a selector, so a new row is tagged on the next pass).
@@ -1030,8 +1481,41 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
         if (target.getAttribute('data-dsh-myskin-embed') !== img.id) target.setAttribute('data-dsh-myskin-embed', img.id)
       }
     }
+  }
+
+  // Keep the real page stamped with the DRAFT's anchors while the editor is open.
+  //
+  // The engine does this for the committed document, but an image the user just anchored (or
+  // re-anchored) has to appear in the preview first: that is what makes 「锚定」 something you
+  // can see before saving — and what removes the tag from the element an image was just
+  // moved away from.
+  useEffect(() => {
+    stampDraftImages()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageSignature])
+
+  // …and keep it stamped across React rebuilds.
+  //
+  // The tag lives on a REAL node, so anything that rebuilds the subtree wipes it — folding the
+  // sidebar and unfolding it again is enough. The engine retries that for the committed document,
+  // but while the editor owns the tags its loop is skipped (it would revive images the draft just
+  // deleted), so the editor owes the same retry. Without it the preview paints nothing after the
+  // sidebar folds and unfolds — the exact report, which also explains why the selection box stayed:
+  // the container itself never went anywhere.
+  //
+  // childList/subtree only: the pass writes ATTRIBUTES, so it can never wake itself.
+  useEffect(() => {
+    let frame = 0
+    const pass = (): void => { frame = 0; stampDraftImages() }
+    const schedule = (): void => { if (frame === 0) frame = requestAnimationFrame(pass) }
+    const observer = new MutationObserver(schedule)
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => {
+      observer.disconnect()
+      if (frame !== 0) cancelAnimationFrame(frame)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // 组件锚定 in the preview: the very layer the engine will mount, fed from the live draft.
   // The editor cannot preview these with CSS — being painted outside the component is the
@@ -1082,32 +1566,13 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
   }, [])
 
   /**
-   * Resolve a click to the element to select.
+   * Resolve a point to the element the canvas would select there.
    *
    * The decision itself lives in the engine ({@link pickElementAt}) because it is
    * pure DOM logic with a real regression behind it: the gray default text of an
    * empty composer is painted `pointer-events: none`, so the browser's own hit test
    * never returns it and clicking it used to select the empty contenteditable
    * behind it — an element with no text to edit.
-   * @param clientX - pointer x.
-   * @param clientY - pointer y.
-   * @returns the element to select, or undefined when only own UI is under the point.
-   */
-  /**
-   * Elements the canvas must never select: its own UI and the document roots.
-   *
-   * One predicate for the picker, the hover tracker and the parent/child buttons, so
-   * the dashed outline, the click result and the traversal can never disagree.
-   * @param el - candidate element.
-   * @returns true when the canvas must ignore it.
-   */
-  const isOwnElement = (el: Element): boolean =>
-    el.getAttribute('data-dsh-myskin-ui') === '1'
-    || el.closest('[data-dsh-myskin-ui="1"]') !== null
-    || el === document.body || el === document.documentElement || el === document.getElementById('root')
-
-  /**
-   * Resolve a point to the element the canvas would select there.
    * @param clientX - pointer x.
    * @param clientY - pointer y.
    * @returns the element, or undefined when only own UI is under the point.
@@ -1373,8 +1838,10 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
       return
     }
     const target = selected
-    void readImageFile(file).then((url) => {
+    void readPickedImage(file).then(({ url, animated, stilled, width, height }) => {
       if (url === '') { setHint(t('applyFailed')); return }
+      // Say what happened to an animation: a GIF that quietly lost its movement looks like a bug.
+      if (animated) setHint(stilled ? t('gifStilled') : t('gifKept').replace('{n}', dataUrlSize(url)))
       snapshot()
       const id = 'embed-' + Date.now() + '-' + Math.floor(Math.random() * 1000)
       target.setAttribute('data-dsh-myskin-embed', id)
@@ -1388,7 +1855,7 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
         anchor: scope === 'group' && group !== undefined
           ? { kind: 'group', value: group.selector, label: t(groupLabelKey(group.kind)) }
           : anchorFromElement(target),
-        url, x: 0, y: 0, w: 320, h: 200, opacity: 0.9,
+        url, x: 0, y: 0, ...embedSizeFor(width, height), opacity: 0.9,
         pageKey: currentSettingsPageKey(target.ownerDocument),
       }
       setDraft({ ...draft, canvas: { ...draft.canvas, images: [...draft.canvas.images, img] } })
@@ -1398,12 +1865,95 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
     const file = e.target.files?.[0]
     e.target.value = ''
     if (file === undefined) return
-    void readBoundedImage(file).then(({ url, compressed }) => {
+    void readBoundedImage(file).then(({ url, compressed, animated, stilled }) => {
       if (url === '') { setHint(t('imageTooLarge')); return }
       snapshot()
       setDraft({ ...draft, canvas: { ...draft.canvas, background: url } })
-      setHint(compressed ? t('imageCompressed') : undefined)
+      if (animated) setHint(stilled ? t('gifStilled') : t('gifKept').replace('{n}', dataUrlSize(url)))
+      else setHint(compressed ? t('imageCompressed') : undefined)
     })
+  }
+  /**
+   * 对话排版: write the card's rules into the document (one undo step per edit).
+   * @param css - the new rule list.
+   */
+  /**
+   * Preview the draft's TOKENS on the page.
+   *
+   * The editor only ever previewed `css`, so every token edit — markdown typography, a variant's accent,
+   * the token panel — did nothing until 「应用」 was pressed. That is why the markdown card looked like it
+   * was "not changing anything live" (reported). This applies the draft exactly the way the engine applies
+   * the committed document: through the theme registry AND as inline variables (immediate + scheme-correct).
+   */
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined
+    const tokens = draftRef.current.tokens
+    const dark = document.body.hasAttribute('data-ds-dark-theme') || document.documentElement.style.colorScheme === 'dark'
+    /** What was on the element BEFORE us, so the cleanup can hand it back. */
+    const previous = new Map<string, string>()
+    for (const [name, modes] of Object.entries(tokens)) {
+      previous.set(name, document.body.style.getPropertyValue(name))
+      document.body.style.setProperty(name, dark ? modes.dark : modes.light)
+    }
+    const dispose = typeof theme.overrideTokens === 'function' ? theme.overrideTokens(PLUGIN_ID, tokens) : undefined
+    return () => {
+      if (typeof dispose === 'function') dispose()
+      // The engine binds the COMMITTED tokens to the very same inline properties: removing ours outright
+      // would blank the saved skin until the next apply. Hand back what was there instead.
+      for (const [name, before] of previous) {
+        if (before === '') document.body.style.removeProperty(name)
+        else document.body.style.setProperty(name, before)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tokenKey, theme])
+  /**
+   * 层级: put one image above or below its container's content (auto = the blend mode decides).
+   * @param id - the image id.
+   * @param layer - the layer to store.
+   */
+  const setImageLayer = (id: string, layer: ImageLayer): void => {
+    snapshot()
+    setDraft({ ...draft, css: withImageLayer(draft.css, id, layer) })
+  }
+  /**
+   * 边缘晕染: soften one image's edges (width 0 turns it off).
+   * @param id - the image id.
+   * @param feather - the edge treatment to store.
+   */
+  const setImageFeather = (id: string, feather: ImageFeather): void => {
+    snapshot()
+    setDraft({ ...draft, css: withImageFeather(draft.css, id, feather) })
+  }
+  /**
+   * 设置页作用域: keep this image on its own settings page, or let it show on all of them.
+   * @param id - the image id.
+   * @param own - true = only its own page (the default).
+   */
+  const setImagePageScope = (id: string, own: boolean): void => {
+    snapshot()
+    setDraft({ ...draft, css: withImageMarker(draft.css, id, IMAGE_PAGE_SCOPE_PROPERTY, own ? undefined : 'any') })
+  }
+  const setMarkdownSkin = (next: SkinSettings): void => {
+    snapshot()
+    setDraft(next)
+  }
+  /**
+   * Switch where the wallpaper is anchored (see {@link BackgroundAnchor}).
+   *
+   * Stored as a marker declaration inside `css` rather than a `canvas` field: the running Host may
+   * be older than this build, and an unknown `canvas` field would be dropped on save (the whole
+   * point of the marker convention).
+   * @param anchor - the anchor to store.
+   */
+  const setBackgroundAnchor = (anchor: BackgroundAnchor): void => {
+    snapshot()
+    const css = withBackgroundAnchor(draft.css, anchor)
+    setDraft({ ...draft, css })
+    // Persisted on the spot, like the strength slider: the setting is only observable in 交互模式
+    // (that is where the sidebar folds), and 交互模式 paints the COMMITTED document — a draft-only
+    // toggle would silently disappear the moment the user goes to look at it.
+    schedulePersistStrength(draft.canvas, css)
   }
   const clearPageBg = (): void => {
     snapshot()
@@ -1583,12 +2133,23 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
   useEffect(() => { selectedRef.current = selected }, [selected])
   useEffect(() => { closeRef.current = closeDiscarding })
 
+  /**
+   * Select an element — and leave image editing, because the canvas shows ONE selection at a time.
+   * @param el - the element to select (undefined clears the selection, e.g. a click on nothing).
+   */
+  const selectElement = (el: Element | undefined): void => {
+    setSelectedImage(undefined)
+    setSelected(el)
+    // Picking on the canvas follows the object picked: the panel shows that kind of edit.
+    setPanelTab('component')
+  }
+
   /** Select the nearest selectable ancestor of the current selection (父级 / Alt+↑). */
   const selectParent = (): void => {
     const el = selectedRef.current
     if (el === undefined) return
     const parent = parentTarget(el, isOwnElement)
-    if (parent !== undefined) setSelected(parent)
+    if (parent !== undefined) selectElement(parent)
   }
   /** Select the direct child under the last click (子级 / Alt+↓). */
   const selectChild = (): void => {
@@ -1598,7 +2159,7 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
     if (point === undefined) return
     const stack = Array.from(document.elementsFromPoint(point.x, point.y))
     const child = childTargetIn(stack, el, isOwnElement)
-    if (child !== undefined) setSelected(child)
+    if (child !== undefined) selectElement(child)
   }
 
   /**
@@ -1661,7 +2222,9 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
         // An upstream dialog owns Escape while it is open: let it close first.
         if (document.querySelector('[data-shortcut-modal], [aria-modal="true"]') !== null) return
         e.preventDefault()
-        // First Escape drops the selection, the second one leaves the editor (discarding).
+        // First Escape drops whatever is selected — an image first, then a component — and the one
+        // after that leaves the editor (discarding). One selection at a time, one Escape each.
+        if (selectedImageRef.current !== undefined) { setSelectedImage(undefined); return }
         if (selectedRef.current !== undefined) { setSelected(undefined); return }
         closeRef.current()
       }
@@ -1689,21 +2252,71 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
   }
 
   /**
-   * The other members of the block being edited.
+   * The other elements the active scope covers.
    *
-   * 整组 has to be VISIBLE on the page, not just a segmented control in the panel: every other
-   * member gets an outline, so "this edit covers these" is something the user can see before
-   * changing anything.
+   * 整组 / 全站 have to be VISIBLE on the page, not just a segmented control in the panel: every
+   * other member gets an outline, so "this edit covers these" is something the user can see before
+   * changing anything. A 全站 identity can name dozens of elements, so the outlines stop at a
+   * screenful — the count on the scope button carries the rest.
    */
-  const groupPeers = scope === 'group' && group !== undefined
-    ? Array.from(document.querySelectorAll(group.selector)).filter((el) => el !== selected && el.isConnected)
-    : []
+  const scopeSelector = scope === 'group' ? group?.selector : scope === 'site' ? siteScope?.selector : undefined
+  const groupPeers = scopeSelector === undefined
+    ? []
+    : Array.from(document.querySelectorAll(scopeSelector)).filter((el) => el !== selected && el.isConnected).slice(0, PEER_OUTLINE_MAX)
   const selRect = selected !== undefined && selected.isConnected ? selected.getBoundingClientRect() : null
   // The dashed hover outline is skipped while the pointer is on the selection itself
   // (the solid box is already there) and dies with a node React replaced.
   const hoverRect = mode === 'edit' && hover !== undefined && hover !== selected && hover.isConnected ? hover.getBoundingClientRect() : null
+  /**
+   * Whether the ELEMENT chrome (selection box, grips, block outlines, hover outline) is drawn.
+   *
+   * An image takes the selection over completely: while one is being edited the page shows exactly
+   * one box — the image's — instead of the element's selection underneath it. The element selection
+   * itself is kept (it is what 「用选中元素」/「取选中文字」 act on); only its chrome steps aside.
+   */
+  const elementChrome = mode === 'edit' && selectedImage === undefined
+  /** The selected image's record, when it still exists in the draft. */
+  const selectedImageData = selectedImage === undefined ? undefined : draft.canvas.images.find((img) => img.id === selectedImage)
+  /** Where the selected image currently lands (for the header card's label and 「选中容器」). */
+  const selectedImageHost = selectedImageData === undefined ? undefined : resolveImageAnchor(selectedImageData, document)
+  /**
+   * Why the selected image may not be visible.
+   *
+   * Computed for the SELECTED image only: each verdict costs a handful of hit tests, and the answer is
+   * only worth anything for the picture the user is looking at.
+   */
+  const imageDiag: ImageDiagnosis | undefined = selectedImageData === undefined
+    ? undefined
+    : diagnoseEmbeddedImage(selectedImageData, document, embedPaintsAbove(selectedImageData, readImageLayer(draft, selectedImageData.id)), 3, readImageFeather(draft, selectedImageData.id).width, (selectedImageData.pageKey ?? '') !== '' && !imagePageMatches(draft, selectedImageData, currentSettingsPageKey(document)))
   /** Save chip colour: grey when clean, amber when dirty, red when the write failed. */
   const saveColor = save.state === 'failed' ? tok.error : save.state === 'dirty' ? tok.warn : tok.labelTertiary
+  /** The fold button points at the panel: toward it while it is open, away while it is folded. */
+  const panelArrow = (dock === 'right') === panelOpen ? '›' : '‹'
+  /** The dock button offers the OTHER side, which is the fix when something is hidden behind this one. */
+  const dockTarget = otherDock(dock)
+  /**
+   * The block anchor offered to the images card, when the selection belongs to a block.
+   *
+   * 「整组」 as an anchor means one picture on EVERY member of the block (and on the members created
+   * later) — the anchor panel points an image at it either way.
+   */
+  const groupAnchor: ImageAnchor | undefined = scope === 'group' && group !== undefined
+    ? { kind: 'group', value: group.selector, label: t(groupLabelKey(group.kind)) }
+    : undefined
+  /** The settings surface as the 『界面显示』 card names it (label comes from the active locale). */
+  const settingsView = settingsSurface(t('viewSettings'))
+  /**
+   * Every surface the 『界面显示』 card can name: the settings dialog, the page on screen, then the
+   * pages visited before. Capped so a long history cannot push the rest of the panel away.
+   */
+  const surfaces: Surface[] = [settingsView]
+  if (pageView !== undefined) surfaces.push(pageView)
+  for (const known of knownPages) {
+    if (surfaces.length >= MAX_SURFACE_ROWS || surfaces.some((entry) => entry.id === known.id)) continue
+    surfaces.push(known)
+  }
+  /** Name of the topmost element the panel is covering, or '' when nothing is (see occlusion.ts). */
+  const occludedLabel = occluded.length === 0 ? '' : shortLabel(elementLabel(occluded[0]))
 
   return (
     <div data-dsh-myskin-ui="1" data-dsh-myskin-canvas="1" style={{ position: 'fixed', inset: 0, zIndex: 9999, pointerEvents: 'none', color: tok.labelPrimary }}>
@@ -1727,7 +2340,8 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
           <span className="dsh-myskin-sep" />
           <Button style={btnBase} size="sm" variant={snapOn ? 'primary' : 'ghost'} onClick={() => { setSnapOn(!snapOn) }} title={t('snapHint')}>{t('snapAlign')}</Button>
           <Button style={btnBase} size="sm" variant={showTokens ? 'primary' : 'ghost'} onClick={() => { setShowTokens(!showTokens) }}>{t('tokenPanel')}</Button>
-          <Button style={btnBase} size="sm" variant={panelOpen ? 'ghost' : 'primary'} onClick={() => { setPanelOpen(!panelOpen) }} title={panelOpen ? t('panelHideHint') : t('panelShowHint')}>{panelOpen ? '›' : '‹'} {t('panelLabel')}</Button>
+          <Button style={btnBase} size="sm" variant={panelOpen ? 'ghost' : 'primary'} onClick={() => { setPanelOpen(!panelOpen) }} title={panelOpen ? t('panelHideHint') : t('panelShowHint')}>{panelArrow} {t('panelLabel')}</Button>
+          <Button style={btnBase} size="sm" variant="ghost" onClick={() => { setDock(dockTarget) }} title={dockTarget === 'left' ? t('dockLeftHint') : t('dockRightHint')}>{dockTarget === 'left' ? '⇤ ' : '⇥ '}{dockTarget === 'left' ? t('dockLeft') : t('dockRight')}</Button>
           <span className="dsh-myskin-sep" />
           <span title={save.state === 'failed' ? (save.detail ?? t('saveFailed')) : t('saveHint')} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '2px 9px', borderRadius: 999, border: '1px solid ' + tok.borderL2, background: tok.bgLayer2, fontSize: 12, lineHeight: '18px', whiteSpace: 'nowrap', color: saveColor }}>
             <span className="dsh-myskin-dot" data-state={save.state} style={{ width: 8, height: 8, borderRadius: '50%', background: saveColor, flex: 'none' }} />
@@ -1748,11 +2362,23 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 16px 6px var(--dsh-myskin-leading, 16px)', fontSize: 12, lineHeight: '18px', color: hint !== undefined ? tok.warn : flash !== undefined ? tok.success : tok.labelTertiary }}>
           <span key={hint ?? flash ?? 'idle'} className={hint !== undefined || flash !== undefined ? 'dsh-myskin-warn' : undefined} style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{hint ?? flash ?? (mode === 'edit' ? t('editHint') : t('interactHint'))}</span>
+          {/* Something is pinned to the window edge and the panel is sitting on it: the fix is one
+              click, and it is offered right here rather than in a manual nobody reads. */}
+          {occluded.length > 0 ? (
+            <button type="button" data-dsh-myskin-ui="1" className="dsh-myskin-chip" onClick={() => { setDock(dockTarget) }} title={t('occludedHint')}
+              style={{ flex: 'none', display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 10px', borderRadius: 999, border: '1px solid ' + tok.warn, background: tok.bgLayer2, color: tok.warn, fontSize: 12, lineHeight: '18px', whiteSpace: 'nowrap', cursor: 'pointer' }}>
+              ⚠ {t('occludedWarn').replace('{n}', occludedLabel)} · {dockTarget === 'left' ? t('dockLeft') : t('dockRight')}
+            </button>
+          ) : null}
           <span style={{ flex: 'none', color: tok.labelTertiary }}>{t('shortcuts')}</span>
         </div>
       </div>
-      <div ref={panelRef} className="dsh-myskin-panel dsh-myskin-scroll" data-open={panelOpen ? '1' : '0'} data-dsh-myskin-ui="1" style={{ pointerEvents: panelOpen ? 'auto' : 'none', visibility: panelOpen ? 'visible' : 'hidden', position: 'absolute', top: 'calc(var(--dsh-myskin-chrome-top, 0px) + var(--dsh-myskin-inset-top, 48px))', right: 0, bottom: 0, width: panelOpen ? 340 : 0, display: 'flex', flexDirection: 'column', gap: 12, overflowX: 'hidden', overflowY: 'auto', padding: panelOpen ? 12 : 0, background: panelOpen ? tok.bgOverlay : 'transparent', borderLeft: panelOpen ? '1px solid ' + tok.borderL2 : 'none', zIndex: 10004 }}>
-        {draft.canvas.background !== undefined && draft.canvas.background !== '' ? (
+      {/* The panel sits on the docked edge and keeps its hairline divider on the side facing the
+          page: everything that is not the inset (position, border, the fold animation, the shadow
+          in canvas-ui.ts) follows `dock`, so the two layouts cannot drift apart. */}
+      <div ref={panelRef} className="dsh-myskin-panel dsh-myskin-scroll" data-open={panelOpen ? '1' : '0'} data-dsh-myskin-ui="1" style={{ pointerEvents: panelOpen ? 'auto' : 'none', visibility: panelOpen ? 'visible' : 'hidden', position: 'absolute', top: 'calc(var(--dsh-myskin-chrome-top, 0px) + var(--dsh-myskin-inset-top, 48px))', ...(dock === 'right' ? { right: 0 } : { left: 0 }), bottom: 0, width: panelOpen ? PANEL_WIDTH : 0, display: 'flex', flexDirection: 'column', gap: 12, overflowX: 'hidden', overflowY: 'auto', padding: panelOpen ? 12 : 0, background: panelOpen ? tok.bgOverlay : 'transparent', borderLeft: panelOpen && dock === 'right' ? '1px solid ' + tok.borderL2 : 'none', borderRight: panelOpen && dock === 'left' ? '1px solid ' + tok.borderL2 : 'none', zIndex: 10004 }}>
+        {mode === 'edit' && panelTab === 'look' && draft.canvas.background !== undefined && draft.canvas.background !== '' ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: tok.labelSecondary }}>
             <span>{t('backgroundOpacity')} · {Math.round(readBackgroundOpacity(draft) * 100)}%</span>
             <input
@@ -1768,8 +2394,40 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
               }}
             />
           </label>
+          {/*
+            可选项：壁纸锚在对话区自己的框上（侧边栏展开/收起时重新居中，不需要脚本）。
+            它必须有自己的 label：套在滑块那个 label 里时，点这一行会去激活滑块（label 的第一个可标记控件），
+            开关根本没被切换——而且嵌套 label 本身就不合法。
+          */}
+          <label className="dsh-myskin-field" style={{ gap: 6, alignItems: 'flex-start', cursor: 'pointer' }}>
+            <input type="checkbox" checked={readBackgroundAnchor(draft) === 'conversation'}
+              onChange={(e) => { setBackgroundAnchor(e.target.checked ? 'conversation' : 'viewport') }} />
+            <span style={{ flex: 1, minWidth: 0, fontSize: 11, lineHeight: '16px', color: tok.labelSecondary }}>
+              {t('backgroundAnchor')}
+              <br />
+              <span style={{ color: tok.labelTertiary }}>{t('backgroundAnchorHint')}</span>
+            </span>
+          </label>
+          </div>
         ) : null}
+          {/* 五类编辑各自一个页签：不同类型不再挤在同一条滚动里。 */}
           {mode === 'edit' ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span style={{ display: 'inline-flex', border: '1px solid ' + tok.borderL2, borderRadius: 8, overflow: 'hidden' }}>
+                  {PANEL_TABS.map((entry) => (
+                    <Button key={entry} size="sm" variant={panelTab === entry ? 'primary' : 'ghost'} title={t('tabHint')}
+                      onClick={() => { setPanelTab(entry) }}>
+                      {t(PANEL_TAB_LABEL[entry] as MySkinKey)}
+                      {entry === 'image' && draft.canvas.images.length > 0 ? ' ' + String(draft.canvas.images.length) : ''}
+                      {entry === 'text' && draft.text.length > 0 ? ' ' + String(draft.text.length) : ''}
+                    </Button>
+                  ))}
+                </span>
+              </div>
+            </div>
+          ) : null}
+          {mode === 'edit' && panelTab === 'component' ? (
             selected !== undefined ? (
               <Inspector
                 target={selected}
@@ -1780,11 +2438,6 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
                 onLiveText={liveText}
                 onRemoveText={removeText}
                 onRemove={removeSelector}
-                onEmbedOpacity={(id, v) => updateEmbed(id, { opacity: clampNum(v, 0, 1) })}
-                onEmbedBlend={(id, v) => updateEmbed(id, { blend: v })}
-                onEmbedAnchor={(id, anchor) => { updateEmbed(id, { anchor }) }}
-                onEmbedMode={(id, mode) => { updateEmbed(id, { mode }) }}
-                onRemoveEmbed={removeEmbed}
                 onHide={hideElement}
                 onUnhide={unhideElement}
                 onRemoveControl={removeControl}
@@ -1795,6 +2448,16 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
                 onRemoveFont={removeFont}
                 activeSelector={activeSelector}
                 group={group}
+                site={site}
+                settingsView={settingsView}
+                pageView={pageView}
+                surfaces={surfaces}
+                inSettings={inSettings}
+                onSurfaceHidden={setSurfaceVisibility}
+                onKeepOnly={keepOnlySurface}
+                onHideEverywhere={hideEverywhere}
+                onRestoreAllHidden={restoreAllHidden}
+                onAddDeclaration={addDeclaration}
                 scope={scope}
                 onScope={changeScope}
                 gapSelector={gapSelector}
@@ -1817,10 +2480,81 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
                 <span style={{ color: tok.labelTertiary }}>{t('shortcuts')}</span>
               </div>
             )
-          ) : (
+          ) : mode === 'edit' ? null : (
+            /* 交互模式下没有页签：面板只留一句提示（页面自己的键盘与鼠标都归 DSH）。 */
             <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{t('interactHint')}</span>
           )}
-        {mode === 'edit' ? (
+        {/* 图片页签：选中的那张 + 全部图片（每张一个面板）。 */}
+        {mode === 'edit' && panelTab === 'image' ? (
+          <>
+            {selectedImageData !== undefined ? (
+              /* 选中的图片：和选中组件同级——画布上只有这一个框，面板这里也只显示它。 */
+              <div className="dsh-myskin-card" style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 10 }}>
+                <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>{t('imageSelected')}</span>
+                <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelPrimary, wordBreak: 'break-word' }}>
+                  {selectedImageHost === undefined ? anchorLabel(anchorOf(selectedImageData), t) : elementLabel(selectedImageHost, 40)}
+                </span>
+                <span style={{ fontSize: 11, lineHeight: '16px', color: selectedImageHost === undefined ? tok.warn : tok.success }}>
+                  {selectedImageHost === undefined ? t('anchorMissing') : t('anchorOk') + ' · ' + anchorLabel(anchorOf(selectedImageData), t)}
+                </span>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <Button style={btnBase} size="sm" variant="outline" disabled={selectedImageHost === undefined}
+                    onClick={() => { if (selectedImageHost !== undefined) { selectElement(selectedImageHost); setSelectionEpoch((n) => n + 1) } }}>{t('selectHost')}</Button>
+                  <Button style={btnBase} size="sm" variant="ghost" onClick={() => { setSelectedImage(undefined) }}>{t('deselect')}</Button>
+                </div>
+                {/* 为什么看不见：三种成因分开报，用户才不会去修错的地方。 */}
+                <span style={{ fontSize: 11, lineHeight: '16px', color: imageDiag !== undefined && imageDiag.verdict === 'ok' ? tok.success : tok.warn }}>
+                  {t(imageDiagKey(imageDiag))}
+                </span>
+                <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('imageSelectedHint')}</span>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        {/* 变体：整套观感用选项拼出来，不需要写 CSS。 */}
+        {mode === 'edit' && panelTab === 'variant' ? (
+          <VariantPanel draft={draft} onChangeSkin={setMarkdownSkin} t={t} />
+        ) : null}
+        {/* 区域外观：整块改一个面（对话区/侧边栏/输入框/设置页/消息列表）。 */}
+        {mode === 'edit' && panelTab === 'region' ? (
+          <RegionPanel draft={draft} onChangeSkin={setMarkdownSkin} t={t} />
+        ) : null}
+        {/* 对话排版：DSH 生成的 markdown（锚点取渲染器自己的根元素，不写死构建哈希）。 */}
+        {mode === 'edit' && panelTab === 'markdown' ? (
+          <MarkdownPanel draft={draft} onChangeSkin={setMarkdownSkin} t={t} />
+        ) : null}
+        {/* 文字：所有改过的文案，一处一份，不必回到页面上找。 */}
+        {mode === 'edit' && panelTab === 'text' ? (
+          <TextPanel
+            draft={draft}
+            onEdit={liveText}
+            onRemove={removeText}
+            onSelect={(selector) => { const el = safeQuery(selector); if (el !== null) selectElement(el) }}
+            t={t}
+          />
+        ) : null}
+        {/* 嵌入图片：设置独立成卡，不依赖当前选中——不必先找到它嵌在哪儿。 */}
+        {mode === 'edit' && panelTab === 'image' ? (
+          <EmbedImages
+            draft={draft}
+            target={selected}
+            groupAnchor={groupAnchor}
+            onAnchor={(id, anchor) => { updateEmbed(id, { anchor }) }}
+            onMode={(id, mode) => { updateEmbed(id, { mode }) }}
+            onOpacity={(id, value) => { updateEmbed(id, { opacity: clampNum(value, 0, 1) }) }}
+            onBlend={(id, value) => { updateEmbed(id, { blend: value }) }}
+            onGeometry={(id, patch) => { updateEmbed(id, patch) }}
+            onLayer={setImageLayer}
+            onFeather={setImageFeather}
+            onPageScope={setImagePageScope}
+            onRemove={removeEmbed}
+            selectedImage={selectedImage}
+            onSelectImage={setSelectedImage}
+            onSelectHost={(el) => { selectElement(el); setSelectionEpoch((n) => n + 1) }}
+            t={t}
+          />
+        ) : null}
+        {mode === 'edit' && panelTab === 'component' ? (
           <RecycleBin
             entries={removedControls(draft.css)}
             onRestore={(selector) => { restoreRemoved([selector]) }}
@@ -1828,7 +2562,7 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
             t={t}
           />
         ) : null}
-        {mode === 'edit' && showTokens ? (
+        {mode === 'edit' && panelTab === 'look' && showTokens ? (
           <TokenPanel tokens={draft.tokens} onToggle={toggleToken} onChange={setToken} t={t} />
         ) : null}
       </div>
@@ -1839,8 +2573,8 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
       ) : (
         <div key={'gy' + String(line.at)} data-dsh-myskin-ui="1" className="dsh-myskin-guide" style={{ position: 'fixed', left: 0, right: 0, top: line.at, height: 1, background: tok.brand, pointerEvents: 'none', zIndex: 10003 }} />
       ))}
-      {mode === 'edit' && hoverRect !== null ? <ElementBox rect={hoverRect} label={elementLabel(hover as Element)} solid={false} /> : null}
-      {mode === 'edit' ? groupPeers.map((el, index) => {
+      {elementChrome && hoverRect !== null ? <ElementBox rect={hoverRect} label={elementLabel(hover as Element)} solid={false} /> : null}
+      {elementChrome ? groupPeers.map((el, index) => {
         const rect = el.getBoundingClientRect()
         if (rect.width === 0 && rect.height === 0) return null
         return (
@@ -1848,8 +2582,8 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
             style={{ position: 'fixed', left: rect.left, top: rect.top, width: rect.width, height: rect.height, border: '1px dashed ' + tok.brand, borderRadius: 4, opacity: 0.5, pointerEvents: 'none', zIndex: 10000 }} />
         )
       }) : null}
-      {mode === 'edit' && selRect !== null ? <ElementBox key={'sel-' + selectionEpoch} rect={selRect} label={selected === undefined ? '' : elementLabel(selected) + (scope === 'group' && group !== undefined ? ' · ' + t('scopeGroup') + ' ' + String(group.count) : '')} solid /> : null}
-      {mode === 'edit' && selRect !== null ? (
+      {elementChrome && selRect !== null ? <ElementBox key={'sel-' + selectionEpoch} rect={selRect} label={selected === undefined ? '' : elementLabel(selected) + (scope === 'group' && group !== undefined ? ' · ' + t('scopeGroup') + ' ' + String(group.count) : '')} solid /> : null}
+      {elementChrome && selRect !== null ? (
         <>
           {/* Two grips only, both on corners: the element's own area stays pickable. */}
           <div data-dsh-myskin-ui="1" onPointerDown={(e) => { transformDrag(e, 'move') }} title={t('moveGripHint')}
@@ -1871,8 +2605,9 @@ function SkinCanvas({ initial, onClose, onSave, onCommit, onPersistStrength, t }
         const zx = crect.left + (img.x || 0), zy = crect.top + (img.y || 0)
         return (
           <Fragment key={img.id}>
-            <div data-dsh-myskin-ui="1" onPointerDown={(e) => { onEmbedPointerDown(e, img) }} onClick={(e) => { e.stopPropagation() }}
-              style={{ position: 'fixed', left: zx + 'px', top: zy + 'px', width: img.w + 'px', height: img.h + 'px', border: '2px dashed ' + tok.brand, background: 'transparent', pointerEvents: mode === 'edit' ? 'auto' : 'none', cursor: 'move', zIndex: 10001 }} />
+            <div data-dsh-myskin-ui="1" onPointerDown={(e) => { setSelectedImage(img.id); onEmbedPointerDown(e, img) }} onClick={(e) => { e.stopPropagation() }}
+              title={t('imageSelectedHint')}
+              style={{ position: 'fixed', left: zx + 'px', top: zy + 'px', width: img.w + 'px', height: img.h + 'px', border: '2px ' + (img.id === selectedImage ? 'solid' : 'dashed') + ' ' + tok.brand, boxShadow: img.id === selectedImage ? '0 0 0 1px ' + tok.bgOverlay : 'none', background: 'transparent', pointerEvents: mode === 'edit' ? 'auto' : 'none', cursor: 'move', zIndex: 10001 }} />
             {mode === 'edit' ? (
               <>
                 <button data-dsh-myskin-ui="1" onClick={(e) => { e.stopPropagation(); removeEmbed(img.id) }}
@@ -1935,6 +2670,740 @@ function Section({ title, badge, children }: { title: string; badge?: string; ch
   )
 }
 
+/** The three layer choices, in panel order. */
+const IMAGE_LAYERS: readonly ImageLayer[] = ['auto', 'below', 'above']
+/** Copy key per layer choice. */
+const IMAGE_LAYER_LABEL: Readonly<Record<ImageLayer, MySkinKey>> = {
+  auto: 'imageLayerAuto',
+  below: 'imageLayerBelow',
+  above: 'imageLayerAbove',
+}
+/** Tooltip copy per layer choice. */
+const IMAGE_LAYER_HINT: Readonly<Record<ImageLayer, MySkinKey>> = {
+  auto: 'imageLayerAutoHint',
+  below: 'imageLayerBelowHint',
+  above: 'imageLayerAboveHint',
+}
+/**
+ * Copy key for one visibility diagnosis.
+ * @param diagnosis - the diagnosis (absent while no image is selected).
+ * @returns the copy key.
+ */
+function imageDiagKey(diagnosis: ImageDiagnosis | undefined): MySkinKey {
+  if (diagnosis === undefined || diagnosis.verdict === 'ok') return 'imgDiagOk'
+  if (diagnosis.verdict === 'unresolved') return 'imgDiagUnresolved'
+  if (diagnosis.verdict === 'page-scope') return 'imgDiagPageScope'
+  if (diagnosis.verdict === 'covered') return 'imgDiagCovered'
+  return 'imgDiagClipped'
+}
+
+
+/** Props of {@link VariantPanel}. */
+interface VariantPanelProps {
+  /** The document being edited (the current choices are read out of its marker). */
+  draft: SkinSettings
+  /** Replace the document (the caller snapshots for undo). */
+  onChangeSkin: (next: SkinSettings) => void
+  t: (key: MySkinKey) => string
+}
+
+/**
+ * 「变体」: choose a look, do not write one.
+ *
+ * Whole looks first (one click each), then the four axes behind them — and every axis shows its options
+ * as plain words (`玻璃` / `纸片` / `描边` / `无框`), because the point of a variant is that the user does
+ * not need to know what `backdrop-filter` is. The chosen option is read back out of the document marker,
+ * so the card always shows what is actually in effect.
+ * @param draft - the document being edited.
+ * @param onChangeSkin - writes the new document.
+ * @param t - copy lookup.
+ */
+function VariantPanel({ draft, onChangeSkin, t }: VariantPanelProps): ReactNode {
+  const choices = readVariantChoices(draft)
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>{t('variantTitle')}</span>
+      <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('variantHint')}</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        {VARIANT_LOOKS.map((look) => (
+          <Button key={look.id} style={btnBase} size="sm" variant="outline" title={t(look.hintKey as MySkinKey)}
+            onClick={() => { onChangeSkin(applyVariantLook(draft, look)) }}>{t(look.labelKey as MySkinKey)}</Button>
+        ))}
+        <Button style={btnBase} size="sm" variant="ghost" title={t('variantResetHint')}
+          onClick={() => { onChangeSkin(clearVariant(draft)) }}>{t('mdReset')}</Button>
+      </div>
+      {VARIANT_AXES.map((axis) => {
+        const current = optionFor(axis, choices)
+        return (
+          <div key={axis.id} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>{t(axis.labelKey as MySkinKey)}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              {axis.options.map((option) => (
+                <Button key={option.id} size="sm" variant={option.id === current.id ? 'primary' : 'ghost'} style={btnBase}
+                  title={t(option.hintKey as MySkinKey)}
+                  onClick={() => { onChangeSkin(applyVariantOption(draft, axis, option)) }}>{t(option.labelKey as MySkinKey)}</Button>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+      <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('variantNote')}</span>
+    </div>
+  )
+}
+/** Props of {@link RegionPanel}. */
+interface RegionPanelProps {
+  /** The document being edited (values are read back out of its `css`). */
+  draft: SkinSettings
+  /** Replace the document (the caller snapshots for undo). */
+  onChangeSkin: (next: SkinSettings) => void
+  t: (key: MySkinKey) => string
+}
+
+/**
+ * 「区域外观」: shape a whole surface at once.
+ *
+ * Element-by-element editing answers "make this button rounder"; it is a bad answer to "I want my own
+ * sidebar". A region is a named surface (对话区 / 侧边栏 / 输入框 / 设置页 / 消息列表) with a curated set of
+ * properties — background, glass, radius, border, shadow, padding — that only read as a look when they
+ * are set together, which is also why the presets describe a whole look rather than one property.
+ * @param draft - the document being edited.
+ * @param onChangeSkin - writes the new document.
+ * @param t - copy lookup.
+ */
+function RegionPanel({ draft, onChangeSkin, t }: RegionPanelProps): ReactNode {
+  const [regionId, setRegionId] = useState<string>(REGIONS[0].id)
+  const region = REGIONS.find((entry) => entry.id === regionId) ?? REGIONS[0]
+  const values = readRegionStyle(draft.css, region)
+  /** How many elements this region resolves to on the page in front of the user. */
+  const count = regionCount(document, region)
+  const write = (field: RegionField, value: string | undefined): void => {
+    onChangeSkin({ ...draft, css: writeRegionStyle(draft.css, region, field, value) })
+  }
+  const selectStyle: CSSProperties = { background: tok.bgBase, color: tok.labelPrimary, border: '1px solid ' + tok.borderL2, borderRadius: 6, fontSize: 12, lineHeight: '18px', padding: '2px 6px', flex: '1 1 90px', minWidth: 0 }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>{t('regionTitle')}</span>
+      <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('regionHint')}</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        {REGIONS.map((entry) => (
+          <Button key={entry.id} size="sm" variant={entry.id === region.id ? 'primary' : 'ghost'} style={btnBase}
+            title={t(entry.hintKey as MySkinKey)} onClick={() => { setRegionId(entry.id) }}>{t(entry.labelKey as MySkinKey)}</Button>
+        ))}
+      </div>
+      <span style={{ fontSize: 11, lineHeight: '16px', color: count > 0 ? tok.success : tok.warn }}>
+        {count > 0 ? t('regionFound').replace('{n}', String(count)) : t('regionMissing')}
+      </span>
+      <span title={regionSelector(region)} style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary, wordBreak: 'break-all' }}>{regionSelector(region)}</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        {REGION_PRESETS.map((preset) => (
+          <Button key={preset.id} style={btnBase} size="sm" variant="outline" title={t(preset.hintKey as MySkinKey)}
+            onClick={() => { onChangeSkin({ ...draft, css: applyRegionPreset(draft.css, region, preset) }) }}>{t(preset.labelKey as MySkinKey)}</Button>
+        ))}
+        <Button style={btnBase} size="sm" variant="ghost" title={t('regionResetHint')}
+          onClick={() => { onChangeSkin({ ...draft, css: clearRegionStyles(draft.css) }) }}>{t('mdReset')}</Button>
+      </div>
+      {REGION_FIELDS.filter((field) => field.kind !== 'option' || field.options !== undefined).map((field) => {
+        const label = t(field.labelKey as MySkinKey)
+        const raw = values.get(field.id)
+        if (field.kind === 'color') return <ColorRow key={field.id} label={label} raw={raw} clearTitle={t('mdUnset')} onSet={(value) => { write(field, value) }} />
+        if (field.kind === 'option') {
+          return (
+            <Field key={field.id} label={label} clearTitle={t('mdUnset')} clearable={raw !== undefined} onClear={() => { write(field, undefined) }}>
+              <select value={raw ?? ''} style={selectStyle} onChange={(e: ChangeEvent<HTMLSelectElement>) => { write(field, e.target.value === '' ? undefined : e.target.value) }}>
+                {(field.options ?? []).map((option) => (
+                  <option key={option.value} value={option.value}>{t(option.labelKey as MySkinKey)}</option>
+                ))}
+              </select>
+            </Field>
+          )
+        }
+        if (field.kind === 'toggle') {
+          return (
+            <label key={field.id} className="dsh-myskin-field" style={{ gap: 6, cursor: 'pointer' }}>
+              <input type="checkbox" checked={raw === field.onValue}
+                onChange={(e) => { write(field, e.target.checked ? field.onValue : field.offValue) }} />
+              <span style={{ flex: 1, minWidth: 0 }}>{label}</span>
+            </label>
+          )
+        }
+        return (
+          <NumberRow key={field.id} label={label} raw={raw} unit={field.unit ?? ''} step={field.step ?? 1}
+            min={field.min ?? 0} max={field.max ?? 9999} clearTitle={t('mdUnset')} onSet={(value) => { write(field, value) }} />
+        )
+      })}
+    </div>
+  )
+}
+/** Props of {@link TextPanel}. */
+interface TextPanelProps {
+  /** The document being edited (the overrides are read from `text`). */
+  draft: SkinSettings
+  /** Apply a copy change live (the caller snapshots, so one edit is one undo step). */
+  onEdit: (selector: string, before: string, after: string) => void
+  /** Drop one override. */
+  onRemove: (selector: string) => void
+  /** Take the canvas to the element this override belongs to. */
+  onSelect: (selector: string) => void
+  t: (key: MySkinKey) => string
+}
+
+/**
+ * A labelled numeric row: wheel + text, clamped, with a clear button.
+ *
+ * Shared by the markdown and region cards. Both write CSS values into the document ("14px", "1.7")
+ * and read them back, so both need exactly this control — and a second copy of it is how the two cards
+ * would start behaving differently.
+ * @param label - row label.
+ * @param raw - the current CSS value, if any.
+ * @param unit - unit appended on write ('' for a bare number).
+ * @param step - wheel/typing step.
+ * @param min - lowest sensible value.
+ * @param max - highest sensible value.
+ * @param onSet - writes the value (undefined clears it).
+ * @param clearTitle - tooltip of the clear button.
+ * @returns the row.
+ */
+function NumberRow({ label, raw, unit, step, min, max, onSet, clearTitle }: {
+  label: string
+  raw: string | undefined
+  unit: string
+  step: number
+  min: number
+  max: number
+  onSet: (value: string | undefined) => void
+  clearTitle: string
+}): ReactNode {
+  const parsed = raw === undefined ? undefined : Number.parseFloat(raw)
+  const value = parsed !== undefined && Number.isFinite(parsed) ? parsed : undefined
+  return (
+    <Field label={label} clearTitle={clearTitle} clearable={raw !== undefined} onClear={() => { onSet(undefined) }}>
+      <WheelNudge onStep={(direction, big) => {
+        const next = Math.min(max, Math.max(min, (value ?? 0) + direction * step * (big ? 10 : 1)))
+        onSet(String(Math.round(next * 100) / 100) + unit)
+      }}>
+        <Input value={value === undefined ? '' : String(value) + unit} placeholder={clearTitle} title={label}
+          onChange={(e: ChangeEvent<HTMLInputElement>) => {
+            const cleaned = e.target.value.replace(/[^0-9.\-]/g, '')
+            if (cleaned.trim() === '') { onSet(undefined); return }
+            const next = Number.parseFloat(cleaned)
+            if (!Number.isFinite(next)) return
+            onSet(String(Math.min(max, Math.max(min, next))) + unit)
+          }} />
+      </WheelNudge>
+    </Field>
+  )
+}
+
+/**
+ * A labelled colour row: a swatch plus free text, so `rgba(...)` and `var(...)` stay editable.
+ * @param label - row label.
+ * @param raw - the current CSS value, if any.
+ * @param onSet - writes the value (undefined clears it).
+ * @param clearTitle - tooltip of the clear button.
+ * @returns the row.
+ */
+function ColorRow({ label, raw, onSet, clearTitle }: { label: string; raw: string | undefined; onSet: (value: string | undefined) => void; clearTitle: string }): ReactNode {
+  return (
+    <Field label={label} clearTitle={clearTitle} clearable={raw !== undefined} onClear={() => { onSet(undefined) }}>
+      <input type="color" value={toHex(raw ?? '') ?? '#888888'} style={{ width: 28, height: 22, flex: 'none', padding: 0, border: '1px solid ' + tok.borderL2, borderRadius: 6, background: 'transparent' }}
+        onChange={(e) => { onSet(e.target.value) }} />
+      <Input value={raw ?? ''} placeholder={clearTitle} title={label}
+        onChange={(e: ChangeEvent<HTMLInputElement>) => { const next = e.target.value.trim(); onSet(next === '' ? undefined : next) }} />
+    </Field>
+  )
+}
+/**
+ * 「文字」: every copy override in the skin, in one place.
+ *
+ * Copy edits used to exist only as a row inside the element inspector, so editing one again meant
+ * finding that element on the page first — the same trap the images had. Here each override is its own
+ * card with before/after fields, a button that takes the canvas to it, and a remove button; the `text`
+ * field is the only state, so a value typed by hand shows up here too.
+ * @param draft - the document being edited.
+ * @param onEdit - applies a copy change.
+ * @param onRemove - drops an override.
+ * @param onSelect - selects the element behind an override.
+ * @param t - copy lookup.
+ */
+function TextPanel({ draft, onEdit, onRemove, onSelect, t }: TextPanelProps): ReactNode {
+  const entries = draft.text
+  return (
+    <Section title={t('tabText')} badge={entries.length === 0 ? undefined : String(entries.length)}>
+      {entries.length === 0 ? (
+        <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('textEmpty')}</span>
+      ) : (
+        <>
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('textPanelHint')}</span>
+          {entries.map((entry) => {
+            const host = safeQuery(entry.selector)
+            return (
+              <div key={entry.selector} className="dsh-myskin-card" style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10 }}>
+                <div className="dsh-myskin-field" style={{ gap: 6 }}>
+                  <span title={entry.selector} style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: tok.labelSecondary }}>
+                    {host === null ? entry.selector : elementLabel(host, 30)}
+                  </span>
+                  <Button style={{ ...btnBase, flex: 'none' }} size="sm" variant="ghost" disabled={host === null}
+                    onClick={() => { onSelect(entry.selector) }}>{t('selectHost')}</Button>
+                  <Button style={{ ...btnBase, flex: 'none' }} size="sm" variant="ghost" icon={<IconTrash size={14} />}
+                    title={t('remove')} onClick={() => { onRemove(entry.selector) }}>{t('remove')}</Button>
+                </div>
+                <Field label={t('textBefore')} clearTitle={t('mdClear')} clearable={false} onClear={() => undefined}>
+                  <Input value={entry.before} title={t('textBefore')}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => { onEdit(entry.selector, e.target.value, entry.after) }} />
+                </Field>
+                <Field label={t('textAfter')} clearTitle={t('mdClear')} clearable={false} onClear={() => undefined}>
+                  <Input value={entry.after} title={t('textAfter')}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => { onEdit(entry.selector, entry.before, e.target.value) }} />
+                </Field>
+              </div>
+            )
+          })}
+        </>
+      )}
+    </Section>
+  )
+}
+interface MarkdownPanelProps {
+  /** The document being edited (values are read back out of its `tokens` and `css`). */
+  draft: SkinSettings
+  /** Replace the document (the caller snapshots for undo). */
+  onChangeSkin: (next: SkinSettings) => void
+  t: (key: MySkinKey) => string
+}
+
+/**
+ * 「对话排版」: the panel's control over DSH's markdown output.
+ *
+ * The card is DATA-DRIVEN from {@link MARKDOWN_FIELDS}: one row per knob, grouped, and every value is
+ * read back out of `draft.css` — so there is no second copy of the state, undo works like any other
+ * edit, and a value the user types by hand in a rule is picked up by the panel on the next render.
+ * @param draft - the document being edited.
+ * @param onChangeCss - writes the new rule list.
+ * @param onChangeScope - Writes the scope marker.
+ * @param t - copy lookup.
+ */
+/**
+ * 「对话排版」: the panel's control over DSH's markdown output.
+ *
+ * Two halves, because DSH splits the job in two: the TYPE comes from component tokens
+ * (`MARKDOWN_TOKENS` — the sheet writes `font: var(--dsw-font-markdown-base)` and the design system
+ * builds that shorthand from them), and the GAPS come from rules on the real container
+ * (`MARKDOWN_FIELDS`). Everything is data-driven and every value is read back out of the document, so
+ * there is no second copy of the state and a value typed into a rule by hand shows up here too.
+ * @param draft - the document being edited.
+ * @param onChangeSkin - writes the new document.
+ * @param t - copy lookup.
+ */
+function MarkdownPanel({ draft, onChangeSkin, t }: MarkdownPanelProps): ReactNode {
+  const scope = readMarkdownScope(draft)
+  const values = readMarkdownStyles(draft.css, scope)
+  const tokens = readMarkdownTokens(draft)
+  /** What the page is showing right now, for the rows this skin does not override. */
+  const effective = readEffectiveMarkdown(document, scope)
+  const split = markdownTokenSplit(draft)
+  /** How much markdown this page is showing (a skin can be right and the page empty). */
+  const counts = markdownSurfaceCount(document, scope)
+  const writeRule = (target: MarkdownField, value: string | undefined): void => {
+    onChangeSkin({ ...draft, css: writeMarkdownStyle(draft.css, scope, target, value) })
+  }
+  const writeToken = (target: MarkdownTokenField, value: string | undefined): void => {
+    onChangeSkin(writeMarkdownToken(draft, target, value))
+  }
+  const number = (raw: string | undefined): number | undefined => {
+    if (raw === undefined) return undefined
+    const parsed = Number.parseFloat(raw)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  /**
+   * One numeric row (shared by tokens and rules: the only difference is where the value lands).
+   * @param label - row label.
+   * @param raw - current value, if any.
+   * @param unit - unit appended on write.
+   * @param step - wheel/typing step.
+   * @param bounds - lowest/highest sensible value.
+   * @param set - writes the value (undefined clears it).
+   * @returns the row.
+   */
+  const numericRow = (label: string, raw: string | undefined, unit: string, step: number, bounds: readonly [number, number], set: (value: string | undefined) => void, current?: string): ReactNode => {
+    const value = number(raw)
+    return (
+      <Field key={label} label={label} clearTitle={t('mdClear')} clearable={raw !== undefined} onClear={() => { set(undefined) }}>
+        <WheelNudge onStep={(direction, big) => {
+          const base = value ?? 0
+          const next = Math.min(bounds[1], Math.max(bounds[0], base + direction * step * (big ? 10 : 1)))
+          set(String(Math.round(next * 10) / 10) + unit)
+        }}>
+          <Input value={value === undefined ? '' : String(value) + unit} placeholder={current === undefined ? t('mdUnset') : current} title={label}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => {
+              const cleaned = e.target.value.replace(/[^0-9.]/g, '')
+              if (cleaned.trim() === '') { set(undefined); return }
+              const parsed = Number.parseFloat(cleaned)
+              if (!Number.isFinite(parsed)) return
+              set(String(Math.min(bounds[1], Math.max(bounds[0], parsed))) + unit)
+            }} />
+        </WheelNudge>
+      </Field>
+    )
+  }
+  /**
+   * One colour row: a swatch plus a free-text field (so `rgba(...)` and `var(...)` stay editable).
+   * @param label - row label.
+   * @param raw - current value, if any.
+   * @param set - writes the value (undefined clears it).
+   * @returns the row.
+   */
+  const colorRow = (label: string, raw: string | undefined, set: (value: string | undefined) => void, current?: string): ReactNode => (
+    <Field key={label} label={label} clearTitle={t('mdClear')} clearable={raw !== undefined} onClear={() => { set(undefined) }}>
+      <input type="color" value={toHex(raw ?? '') ?? '#888888'} style={{ width: 28, height: 22, flex: 'none', padding: 0, border: '1px solid ' + tok.borderL2, borderRadius: 6, background: 'transparent' }}
+        onChange={(e) => { set(e.target.value) }} />
+      <Input value={raw ?? ''} placeholder={current === undefined ? t('mdUnset') : current} title={label}
+        onChange={(e: ChangeEvent<HTMLInputElement>) => { const next = e.target.value.trim(); set(next === '' ? undefined : next) }} />
+    </Field>
+  )
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>{t('mdTitle')}</span>
+      <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('mdHint')}</span>
+      <span style={{ fontSize: 11, lineHeight: '16px', color: counts.bodies > 0 ? tok.success : tok.warn }}>
+        {counts.bodies > 0 ? t('mdFound').replace('{n}', String(counts.bodies)) : t('mdMissing')}
+      </span>
+      {counts.bodies > 0 && effective.size > 0 ? (
+        <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('mdEffective')}</span>
+      ) : null}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{t('mdScopeLabel')}</span>
+        <span style={{ display: 'inline-flex', border: '1px solid ' + tok.borderL2, borderRadius: 8, overflow: 'hidden' }}>
+          <Button size="sm" variant={scope === 'all' ? 'primary' : 'ghost'} title={t('mdScopeAllHint')}
+            onClick={() => { onChangeSkin({ ...draft, css: withMarkdownScope(draft.css, 'all') }) }}>{t('mdScopeAll')}</Button>
+          <Button size="sm" variant={scope === 'conversation' ? 'primary' : 'ghost'} title={t('mdScopeConversationHint')}
+            onClick={() => { onChangeSkin({ ...draft, css: withMarkdownScope(draft.css, 'conversation') }) }}>{t('mdScopeConversation')}</Button>
+        </span>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        {MARKDOWN_PRESETS.map((preset) => (
+          <Button key={preset.id} style={btnBase} size="sm" variant="outline"
+            onClick={() => { onChangeSkin(applyMarkdownPreset(draft, scope, preset)) }}>{t(preset.labelKey as MySkinKey)}</Button>
+        ))}
+        <Button style={btnBase} size="sm" variant="ghost" title={t('mdResetHint')}
+          onClick={() => { onChangeSkin(clearMarkdownTokens({ ...draft, css: clearMarkdownStyles(draft.css, scope) })) }}>{t('mdReset')}</Button>
+      </div>
+      <Section title={t('mdTokensGroup')} badge={tokens.size === 0 ? undefined : String(tokens.size)}>
+        <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('mdTokensHint')}</span>
+        {MARKDOWN_TOKENS.map((entry) => {
+          const label = t(entry.labelKey as MySkinKey)
+          const raw = tokens.get(entry.id)
+          const set = (value: string | undefined): void => { writeToken(entry, value) }
+          const row = entry.kind === 'color'
+            ? colorRow(label, raw, set, effective.get(entry.id))
+            : numericRow(label, raw, entry.unit ?? '', entry.step ?? 1, [entry.min ?? 1, entry.max ?? 999], set, effective.get(entry.id))
+          if (!split.includes(entry.token)) return row
+          return <Fragment key={entry.id}>{row}<span style={{ fontSize: 11, lineHeight: '16px', color: tok.warn }}>{t('mdTokenSplit')}</span></Fragment>
+        })}
+      </Section>
+      {MARKDOWN_GROUPS.map((group) => {
+        const fields = MARKDOWN_FIELDS.filter((entry) => entry.group === group.id)
+        /** How many of this group's knobs carry a value (the badge is the "what have I touched"). */
+        const setCount = fields.filter((entry) => values.has(entry.id)).length
+        return (
+          <Section key={group.id} title={t(group.labelKey as MySkinKey)} badge={setCount === 0 ? undefined : String(setCount)}>
+            {fields.map((entry) => {
+              const label = t(entry.labelKey as MySkinKey)
+              const current = values.get(entry.id)
+              if (entry.kind === 'toggle') {
+                return (
+                  <label key={entry.id} className="dsh-myskin-field" style={{ gap: 6, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={current === entry.onValue}
+                      onChange={(e) => { writeRule(entry, e.target.checked ? entry.onValue : entry.offValue) }} />
+                    <span style={{ flex: 1, minWidth: 0 }}>{label}</span>
+                  </label>
+                )
+              }
+              if (entry.kind === 'color') return colorRow(label, current, (value) => { writeRule(entry, value) }, effective.get(entry.id))
+              if (entry.kind === 'number' && entry.unit === undefined) {
+                // A bare number (font-weight): no unit, no decimals on the wheel.
+                return numericRow(label, current, '', entry.step ?? 1, [entry.min ?? 100, entry.max ?? 900], (value) => { writeRule(entry, value) }, effective.get(entry.id))
+              }
+              return numericRow(label, current, entry.unit ?? '', entry.step ?? 1, [entry.min ?? 0, entry.max ?? 999], (value) => { writeRule(entry, value) }, effective.get(entry.id))
+            })}
+          </Section>
+        )
+      })}
+    </div>
+  )
+}
+/**
+ * 「嵌入图片」: every embedded image's own settings, in one place that does NOT depend on the
+ * selection.
+ *
+ * This card used to live inside the Inspector, which only exists while an element is selected — so
+ * changing an image's opacity or blend mode meant first finding (and being able to click) whatever
+ * container it was embedded into. An image anchored to a collapsed sidebar, to a row that is hard
+ * to hit, or to something on another page was effectively uneditable. Here every image is listed
+ * with its anchor, a 「选中容器」 button that takes the canvas to its host, and its full set of
+ * controls; the selection is only needed for the two 「用选中…」 actions, which disable themselves
+ * when there is nothing selected.
+ * @param draft - the document being edited (the images are read from it).
+ * @param target - the current selection, when there is one.
+ * @param groupAnchor - the block anchor offered when the selection belongs to a block.
+ * @param onAnchor - re-point one image.
+ * @param onMode - switch one image between 组件嵌入 / 组件锚定.
+ * @param onOpacity - set one image's opacity (0–1).
+ * @param onBlend - set one image's blend mode.
+ * @param onGeometry - move/resize one image (x/y/w/h).
+ * @param onRemove - delete one image.
+ * @param onSelectHost - take the canvas to an image's container.
+ * @param t - copy lookup.
+ */
+function EmbedImages({ draft, target, groupAnchor, selectedImage, onSelectImage, onAnchor, onMode, onOpacity, onBlend, onGeometry, onLayer, onFeather, onPageScope, onRemove, onSelectHost, t }: EmbedImagesProps): ReactNode {
+  const images = draft.canvas.images
+  /** One string for "these images follow these things" — a text anchor scans the DOM. */
+  const signature = images.map((img) => img.id + '|' + anchorKey(anchorOf(img))).join(';')
+  /**
+   * Where each image currently lands.
+   *
+   * Recomputed per anchor change (not per render: this panel re-renders on every frame of an image
+   * drag) and used for three things the user cannot get anywhere else: the label, the ✓/⚠ line, and
+   * the 「选中容器」 button that saves them from hunting for the host on the page.
+   */
+  const hosts = useMemo(() => {
+    const out = new Map<string, Element | undefined>()
+    for (const img of images) out.set(img.id, resolveImageAnchor(img, document))
+    return out
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature, target])
+  /**
+   * Which image panels are unfolded.
+   *
+   * One image, one panel — a picture's settings used to sit in a single shared card, so every image
+   * pushed every other image's fields down the panel and none of them felt like "the one I am
+   * editing". A single image therefore starts unfolded (its panel IS the card), and a whole gallery
+   * starts tidy.
+   */
+  const [openImages, setOpenImages] = useState<string[]>(() => images.length === 1 ? [images[0].id] : [])
+  /** Unfold one image's panel, or fold it back up. Unfolding is also SELECTING: the canvas follows. */
+  const toggleImagePanel = (id: string): void => {
+    if (openImages.includes(id)) { setOpenImages(openImages.filter((entry) => entry !== id)); return }
+    setOpenImages([...openImages, id])
+    onSelectImage(id)
+  }
+  // Selecting on the canvas (or from the header card) unfolds that image's panel, so the settings
+  // for the picture under the selection box are always the ones in view.
+  useEffect(() => {
+    if (selectedImage === undefined) return
+    setOpenImages((previous) => previous.includes(selectedImage) ? previous : [...previous, selectedImage])
+  }, [selectedImage])
+  if (images.length === 0) return null
+  const selectStyle: CSSProperties = { background: tok.bgBase, color: tok.labelPrimary, border: '1px solid ' + tok.borderL2, borderRadius: 6, fontSize: 12, lineHeight: '18px', padding: '2px 6px' }
+  /** The four numbers of an image, one ROW each: X / Y offset and 宽 / 高. */
+  const axes = [
+    { key: 'x' as const, label: 'X', hintKey: 'imageAxisX' as MySkinKey },
+    { key: 'y' as const, label: 'Y', hintKey: 'imageAxisY' as MySkinKey },
+    { key: 'w' as const, label: t('fieldWidth'), hintKey: 'imageAxisW' as MySkinKey },
+    { key: 'h' as const, label: t('fieldHeight'), hintKey: 'imageAxisH' as MySkinKey },
+  ]
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>{t('embedImages')} · {String(images.length)}</span>
+      <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('embedImagesHint')}</span>
+      {images.map((img) => {
+        const anchor = anchorOf(img)
+        const host = hosts.get(img.id)
+        const ok = host !== undefined
+        const isSelected = img.id === selectedImage
+        const open = openImages.includes(img.id)
+        return (
+          /* 每张图 = 它自己的面板：标题行可折叠，右边是它自己的动作，展开才是它自己的设置。 */
+          <div key={img.id} className="dsh-myskin-card"
+            style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, borderColor: isSelected ? tok.brand : undefined }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <button type="button" className="dsh-myskin-head" data-open={open ? '1' : '0'} title={t('imagePanelHint')}
+                onClick={() => { toggleImagePanel(img.id) }} style={{ flex: '1 1 auto', minWidth: 0 }}>
+                <span className="dsh-myskin-chev">▾</span>
+                <span title={img.selector} style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: isSelected ? tok.brand : undefined }}>
+                  {ok ? elementLabel(host, 26) : anchorLabel(anchor, t)}
+                </span>
+                <span style={{ flex: 'none', fontSize: 11, lineHeight: '16px', color: ok ? tok.success : tok.warn }}>{ok ? '✓' : '⚠'}</span>
+              </button>
+              {/* 选中 = 与组件同级的那个选中态：画布上只留这一个框，面板顶部也换成它。 */}
+              {/* 两个动作不许被标题挤小：标题可收缩，按钮不收缩。 */}
+              <Button style={{ ...btnBase, flex: 'none' }} size="sm" variant={isSelected ? 'primary' : 'ghost'} title={t('selectImageHint')}
+                onClick={() => { onSelectImage(isSelected ? undefined : img.id) }}>{isSelected ? t('deselect') : t('selectImage')}</Button>
+              <Button style={{ ...btnBase, flex: 'none' }} size="sm" variant="ghost" icon={<IconTrash size={14} />} title={t('remove')} onClick={() => { onRemove(img.id) }}>{t('remove')}</Button>
+            </div>
+            {open ? (
+            <div className="dsh-myskin-body">
+            <div className="dsh-myskin-field" style={{ gap: 6 }}>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 11, lineHeight: '16px', color: ok ? tok.success : tok.warn }}>
+                {ok ? t('anchorOk') + ' · ' + anchorLabel(anchor, t) : t('anchorMissing')}
+              </span>
+              <Button style={btnBase} size="sm" variant="ghost" disabled={!ok} title={t('selectHostHint')}
+                onClick={() => { if (host !== undefined) onSelectHost(host) }}>{t('selectHost')}</Button>
+            </div>
+            {/* 锚定：图片跟随谁。元素=结构选择器；文字=跟着这段文案；内置组件=固定部位；整组=整类元素 */}
+            <div className="dsh-myskin-field" style={{ gap: 6 }}>
+              <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('anchor')}</span>
+              <select value={anchor.kind} title={t('anchorHint')} style={selectStyle}
+                onChange={(e: ChangeEvent<HTMLSelectElement>) => {
+                  const kind = e.target.value as AnchorKind
+                  if (target === undefined) { onAnchor(img.id, { kind, value: anchor.value, label: anchor.label }); return }
+                  onAnchor(img.id, defaultAnchor(kind, img, target, groupAnchor))
+                }}>
+                <option value="element">{t('anchorKindElement')}</option>
+                <option value="text">{t('anchorKindText')}</option>
+                <option value="component">{t('anchorKindComponent')}</option>
+                <option value="group" disabled={groupAnchor === undefined}>{t('anchorKindGroup')}</option>
+              </select>
+              {anchor.kind === 'component' ? (
+                <select value={anchor.value} title={t('anchorHint')} style={{ ...selectStyle, flex: '1 1 90px', minWidth: 90 }}
+                  onChange={(e: ChangeEvent<HTMLSelectElement>) => { onAnchor(img.id, { kind: 'component', value: e.target.value }) }}>
+                  {ANCHOR_COMPONENTS.map((component) => (<option key={component.id} value={component.id}>{t(component.labelKey)}</option>))}
+                </select>
+              ) : (
+                <Input value={anchor.value}
+                  title={anchor.kind === 'text' ? t('anchorTextHint') : t('anchorSelectorHint')}
+                  placeholder={anchor.kind === 'text' ? t('anchorTextPlaceholder') : t('anchorSelectorPlaceholder')}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => { onAnchor(img.id, { kind: anchor.kind, value: e.target.value }) }} />
+              )}
+              {anchor.kind === 'element' ? (
+                <Button style={btnBase} size="sm" variant="ghost" disabled={target === undefined} onClick={() => { if (target !== undefined) onAnchor(img.id, anchorFromElement(target)) }}>{t('anchorUseSelected')}</Button>
+              ) : null}
+              {anchor.kind === 'text' ? (
+                <Button style={btnBase} size="sm" variant="ghost" disabled={target === undefined} title={t('anchorUseTextHint')}
+                  onClick={() => { if (target === undefined) return; const copy = anchorTextOf(target); if (copy !== undefined) onAnchor(img.id, { kind: 'text', value: copy, label: copy }) }}>{t('anchorUseText')}</Button>
+              ) : null}
+            </div>
+            <div className="dsh-myskin-field" style={{ gap: 6 }}>
+              <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('imageMode')}</span>
+              <select value={imageModeOf(img)} title={t('imageModeHint')} style={selectStyle}
+                onChange={(e: ChangeEvent<HTMLSelectElement>) => { onMode(img.id, e.target.value as ImageMode) }}>
+                <option value="embed">{t('imageModeEmbed')}</option>
+                <option value="anchor">{t('imageModeAnchor')}</option>
+              </select>
+              <span style={{ flex: '1 1 120px', minWidth: 0, fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>
+                {imageModeOf(img) === 'anchor' ? t('imageModeAnchorNote') : t('imageModeEmbedNote')}
+              </span>
+            </div>
+            <div className="dsh-myskin-field" style={{ gap: 6 }}>
+              <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('opacity')}</span>
+              <input type="range" min={0} max={100} value={Math.round((img.opacity ?? 1) * 100)} onChange={(e) => { onOpacity(img.id, Number(e.target.value) / 100) }} style={{ flex: '1 1 70px', minWidth: 70 }} />
+              <span style={{ color: tok.labelTertiary }}>{t('blend')}</span>
+              <select value={img.blend ?? 'normal'} onChange={(e) => { onBlend(img.id, e.target.value as BlendMode) }} style={selectStyle}>
+                {BLEND_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{t(o.labelKey)}</option>))}
+              </select>
+            </div>
+            {/* 混合模式要能看见背后的页面，所以它会把这层挪到内容之上；normal 则留在内容之下。 */}
+            <span style={{ fontSize: 11, lineHeight: '16px', color: embedPaintsAbove(img, readImageLayer(draft, img.id)) ? tok.warn : tok.labelTertiary }}>{t('blendLayerNote')}</span>
+            {/* 层级：内容之上的卡片（如设置页）里，默认的「内容之下」会被内容盖住——这里可以改。 */}
+            <div className="dsh-myskin-field" style={{ gap: 6 }}>
+              <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('imageLayer')}</span>
+              <span style={{ display: 'inline-flex', border: '1px solid ' + tok.borderL2, borderRadius: 8, overflow: 'hidden' }}>
+                {IMAGE_LAYERS.map((entry) => (
+                  <Button key={entry} size="sm" variant={readImageLayer(draft, img.id) === entry ? 'primary' : 'ghost'}
+                    title={t(IMAGE_LAYER_HINT[entry])} onClick={() => { onLayer(img.id, entry) }}>{t(IMAGE_LAYER_LABEL[entry])}</Button>
+                ))}
+              </span>
+            </div>
+            <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('imageLayerHint')}</span>
+            {/* 设置页作用域：默认只在嵌入时那一页显示（键按标签比，重渲染不会误判）。 */}
+            {(img.pageKey ?? '') === '' ? null : (
+              <label className="dsh-myskin-field" style={{ gap: 6, cursor: 'pointer' }}>
+                <input type="checkbox" checked={readImagePageScope(draft, img.id)}
+                  onChange={(e) => { onPageScope(img.id, e.target.checked) }} />
+                <span style={{ flex: 1, minWidth: 0, fontSize: 11, lineHeight: '16px', color: tok.labelSecondary }}>
+                  {t('imagePageScope')}
+                  <br />
+                  <span style={{ color: tok.labelTertiary }}>{t('imagePageScopeHint')}</span>
+                </span>
+              </label>
+            )}
+            {/* 边缘晕染：硬边的贴图直接贴上去很生硬，羽化可以让它「化」进背景。 */}
+            {(() => {
+              const feather = readImageFeather(draft, img.id)
+              const setFeather = (patch: Partial<ImageFeather>): void => { onFeather(img.id, { ...feather, ...patch }) }
+              return (
+                <>
+                  <div className="dsh-myskin-field" style={{ gap: 6 }}>
+                    <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('imageFeather')}</span>
+                    <WheelNudge onStep={(direction, big) => {
+                      const next = Math.max(0, Math.min(200, feather.width + direction * (big ? 10 : 2)))
+                      setFeather({ width: next })
+                    }}>
+                      <Input value={feather.width === 0 ? '' : String(Math.round(feather.width)) + 'px'} placeholder={t('imageFeatherOff')}
+                        title={t('imageFeatherHint')}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                          const cleaned = e.target.value.replace(/[^0-9.]/g, '')
+                          setFeather({ width: cleaned.trim() === '' ? 0 : Math.min(200, Number.parseFloat(cleaned) || 0) })
+                        }} />
+                    </WheelNudge>
+                  </div>
+                  {feather.width > 0 ? (
+                    <>
+                      <div className="dsh-myskin-field" style={{ gap: 6 }}>
+                        <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('imageFeatherSoft')}</span>
+                        <WheelNudge onStep={(direction, big) => {
+                          setFeather({ soft: Math.max(0, Math.min(1, feather.soft + direction * (big ? 0.25 : 0.05))) })
+                        }}>
+                          <Input value={feather.soft === 0 ? '' : String(Math.round(feather.soft * 100))} placeholder={t('imageFeatherOff')}
+                            title={t('imageFeatherSoftHint')}
+                            onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                              const cleaned = e.target.value.replace(/[^0-9.]/g, '')
+                              setFeather({ soft: cleaned.trim() === '' ? 0 : Math.min(1, (Number.parseFloat(cleaned) || 0) / 100) })
+                            }} />
+                        </WheelNudge>
+                      </div>
+                      <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('imageFeatherNote')}</span>
+                    </>
+                  ) : null}
+                </>
+              )
+            })()}
+            {/* 位置与大小：一行一个轴。两个控件并排会把面板撑出边界（Input 自己有最小宽度），
+                所以竖向；数值只到小数点后一位——0.1px 已经是这套编辑器的精度上限。 */}
+            {axes.map((axis) => (
+              <Field key={axis.key} label={axis.label} clearTitle={t('clearField')} clearable={false} onClear={() => undefined}>
+                <WheelNudge onStep={(direction, big) => { onGeometry(img.id, { [axis.key]: round1(stepValue(img[axis.key], direction, big ? 10 : 1)) }) }}>
+                  <Input value={formatOne(img[axis.key])} title={t(axis.hintKey)}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => { onGeometry(img.id, { [axis.key]: round1(toNum(e.target.value, img[axis.key])) }) }} />
+                </WheelNudge>
+              </Field>
+            ))}
+            </div>
+            ) : null}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * Props of {@link EmbedImages}. Kept next to the component so the panel and the list agree on
+ * exactly which edits an image accepts.
+ */
+interface EmbedImagesProps {
+  draft: SkinSettings
+  target: Element | undefined
+  groupAnchor: ImageAnchor | undefined
+  /** The image the canvas is editing (its row is highlighted, and it can be (de)selected here). */
+  selectedImage: string | undefined
+  /** Select (or clear) an image from the list — the same selection the canvas box uses. */
+  onSelectImage: (id: string | undefined) => void
+  onAnchor: (id: string, anchor: ImageAnchor) => void
+  onMode: (id: string, mode: ImageMode) => void
+  onOpacity: (id: string, value: number) => void
+  onBlend: (id: string, value: BlendMode) => void
+  onGeometry: (id: string, patch: Partial<Pick<EmbeddedImage, 'x' | 'y' | 'w' | 'h'>>) => void
+  /** Put one image above or below its container's content. */
+  onLayer: (id: string, layer: ImageLayer) => void
+  /** Change one image's edge treatment. */
+  onFeather: (id: string, feather: ImageFeather) => void
+  /** Keep one image on its own settings page (`false` = show it on every settings page). */
+  onPageScope: (id: string, own: boolean) => void
+  onRemove: (id: string) => void
+  onSelectHost: (el: Element) => void
+  t: (key: MySkinKey) => string
+}
 /**
  * 「回收站」: the controls the skin removes, with a way back.
  *
@@ -2038,13 +3507,6 @@ interface InspectorProps {
   /** Drop the text override that reverts the copy. */
   onRemoveText: (selector: string) => void
   onRemove: (selector: string) => void
-  onEmbedOpacity: (id: string, v: number) => void
-  onEmbedBlend: (id: string, v: BlendMode) => void
-  /** Re-point one embedded image's anchor (element / copy / catalog landmark). */
-  onEmbedAnchor: (id: string, anchor: ImageAnchor) => void
-  /** Switch one image between 组件嵌入 (inside) and 组件锚定 (outside). */
-  onEmbedMode: (id: string, mode: ImageMode) => void
-  onRemoveEmbed: (id: string) => void
   onHide: (selector: string) => void
   onUnhide: (selector: string) => void
   onRemoveControl: (selector: string) => void
@@ -2061,6 +3523,26 @@ interface InspectorProps {
   activeSelector: string
   /** The block the selection belongs to, when it has one. */
   group: ElementGroup | undefined
+  /** The 全站 identity of the selection — or why it has none. */
+  site: SiteScopeOutcome | undefined
+  /** The settings surface, as the 『界面显示』 card names it. */
+  settingsView: Surface
+  /** The page the main area shows (undefined when it carries no marker to hold on to). */
+  pageView: Surface | undefined
+  /** Every surface the card lists, in display order (settings first, then pages). */
+  surfaces: readonly Surface[]
+  /** Whether the settings surface is the one on screen right now. */
+  inSettings: boolean
+  /** Hide or show the selection's component in one surface. */
+  onSurfaceHidden: (surface: Surface, hidden: boolean) => void
+  /** Preset: keep the component visible only on this surface. */
+  onKeepOnly: (surface: Surface) => void
+  /** Preset: hide the component on every surface at once. */
+  onHideEverywhere: () => void
+  /** Show the selection's component everywhere again (the undo for hiding it in every surface). */
+  onRestoreAllHidden: () => void
+  /** Merge one declaration into the element's rule (the z-index field's 「设为 relative」). */
+  onAddDeclaration: (selector: string, declaration: string) => void
   /** Whether the panel edits one element or its whole block. */
   scope: EditScope
   /** Switch the edit scope. */
@@ -2089,7 +3571,7 @@ interface InspectorProps {
   t: (key: MySkinKey) => string
 }
 
-function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText, onRemoveText, onRemove, onEmbedOpacity, onEmbedBlend, onEmbedAnchor, onEmbedMode, onRemoveEmbed, onHide, onUnhide, onRemoveControl, onRestoreControl, onSelectParent, onSelectChild, onEmbedFont, onRemoveFont, activeSelector, group, scope, onScope, gapSelector, gap, onGap, onGapEnd, onRoleFont, onRoleFontEnd, transformAuthored, t }: InspectorProps): ReactNode {
+function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText, onRemoveText, onRemove, onHide, onUnhide, onRemoveControl, onRestoreControl, onSelectParent, onSelectChild, onEmbedFont, onRemoveFont, activeSelector, group, site, settingsView, pageView, surfaces, inSettings, onSurfaceHidden, onKeepOnly, onHideEverywhere, onRestoreAllHidden, onAddDeclaration, scope, onScope, gapSelector, gap, onGap, onGapEnd, onRoleFont, onRoleFontEnd, transformAuthored, t }: InspectorProps): ReactNode {
   const [fontSize, setFontSize] = useState('')
   const [color, setColor] = useState('')
   const [bg, setBg] = useState('')
@@ -2105,6 +3587,24 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
   const [opacity, setOpacity] = useState('')
   const [shadow, setShadow] = useState('')
   const [textAlign, setTextAlign] = useState('')
+  /** Stacking order of the selection ('' = untouched, i.e. the rule keeps `auto`). */
+  const [zIndex, setZIndex] = useState('')
+  /**
+   * Whether the selection is `position: static`.
+   *
+   * z-index only stacks positioned elements (plus flex/grid items), and a number that quietly does
+   * nothing is the kind of thing this panel exists to explain — hence the hint and the one-click
+   * `position: relative` next to the field.
+   */
+  const [staticPosition, setStaticPosition] = useState(false)
+  /**
+   * What the selection competes with, and what caps it (see stacking.ts).
+   *
+   * The panel shows it next to the z-index field because a stacking number that changes nothing is
+   * indistinguishable from a broken field: this says which of the three cases it is, and offers
+   * the two numbers that always do something.
+   */
+  const [stacking, setStacking] = useState<StackingReport | undefined>(undefined)
   const [bgImage, setBgImage] = useState('')
   const [text, setText] = useState('')
   /** Font stack of the selection ('' = untouched, the placeholder shows the computed one). */
@@ -2174,6 +3674,7 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
     transformAuthored.current = false
     const sel = selectorOf(target)
     const rule = draft.css.find((r) => r.selector === sel)?.rule
+    setStaticPosition(getComputedStyle(target).position === 'static')
     if (rule !== undefined && rule.trim() !== '') {
       // This state has its own saved rule -> load its values so the fields visibly
       // differ from 正常 (normal) and match exactly what this state overrides.
@@ -2183,6 +3684,7 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
       setBorderWidth(d['border-width'] ?? ''); setPadding(d['padding'] ?? ''); setWidth(d['width'] ?? '')
       setHeight(d['height'] ?? ''); setMargin(d['margin'] ?? ''); setLineHeight(d['line-height'] ?? '')
       setOpacity(d['opacity'] ?? ''); setShadow(d['box-shadow'] ?? ''); setTextAlign(d['text-align'] ?? '')
+      setZIndex(d['z-index'] ?? '')
       setBgImage(d['background-image'] ?? '')
       setFontFamily(d['font-family'] ?? '')
       const tr = parseTransform(rule)
@@ -2195,7 +3697,7 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
         borderColor: d['border-color'] !== undefined, borderWidth: d['border-width'] !== undefined, padding: d['padding'] !== undefined,
         width: d['width'] !== undefined, height: d['height'] !== undefined, margin: d['margin'] !== undefined,
         lineHeight: d['line-height'] !== undefined, opacity: d['opacity'] !== undefined, shadow: d['box-shadow'] !== undefined,
-        textAlign: d['text-align'] !== undefined,
+        textAlign: d['text-align'] !== undefined, zIndex: d['z-index'] !== undefined,
         fontFamily: d['font-family'] !== undefined,
         transX: d['transform'] !== undefined && tr.x !== 0,
         transY: d['transform'] !== undefined && tr.y !== 0,
@@ -2214,6 +3716,7 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
       setRadius(css.borderRadius); setBorderColor(css.borderTopColor); setBorderWidth(css.borderTopWidth); setPadding(css.padding)
       setWidth(css.width); setHeight(css.height); setMargin(css.margin); setLineHeight(css.lineHeight)
       setOpacity(css.opacity); setShadow(css.boxShadow); setTextAlign(css.textAlign)
+      setZIndex(css.zIndex === 'auto' ? '' : css.zIndex)
       setBgImage(css.backgroundImage === 'none' ? '' : css.backgroundImage)
       setTouched({})
     }
@@ -2237,6 +3740,28 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
     setTextIssue(undefined)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target])
+
+  // Recompute the stacking picture whenever the binding or the draft changes: the numbers the
+  // two buttons offer have to describe the page as it is right now, not as it was when the
+  // element was selected.
+  useEffect(() => {
+    setStacking(stackingReport(target, isOwnElement, (el) => elementLabel(el, 32)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, draft.css, zIndex])
+
+  /**
+   * Write a z-index and make it MEAN something.
+   *
+   * On a `position: static` element the number is inert, so 置顶/置底 also position it — otherwise
+   * the button whose whole job is "put this above the others" would produce exactly the nothing
+   * the user reported.
+   * @param value - the z-index to write.
+   */
+  const applyZIndex = (value: string): void => {
+    setZIndex(value)
+    touch('zIndex')
+    if (staticPosition) onAddDeclaration(sel, 'position: relative !important')
+  }
 
   /**
    * Pending live-preview timer for the text field.
@@ -2434,30 +3959,6 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
    */
   const activeFontFamily = (fontTarget === 'element' ? fontFamily : roleFont(draft.css, fontTarget))
     .split(',')[0].trim().replace(/^"|"$/g, '').toLowerCase()
-  /**
-   * The 整组 anchor offered in the image anchor picker, when the selection belongs to a block.
-   *
-   * Absent means "no block here", which greys the option out instead of writing a selector that
-   * matches a single element and quietly behaves like 仅此元素.
-   */
-  const groupAnchor: ImageAnchor | undefined = group === undefined
-    ? undefined
-    : { kind: 'group', value: group.selector, label: t(groupLabelKey(group.kind)) }
-  /** Every embedded image's anchor, as one string (what "these images follow these things" means). */
-  const anchorSignature = draft.canvas.images.map((img) => img.id + '|' + anchorKey(anchorOf(img))).join(';')
-  /**
-   * Whether each image's anchor resolves on the page right now.
-   *
-   * Computed per anchor change instead of per render: a text anchor scans the DOM, and this
-   * panel re-renders on every frame of an image drag. The hint it feeds is the difference
-   * between "my picture disappeared" and "nothing on this page carries that copy".
-   */
-  const anchorResolves = useMemo(() => {
-    const out = new Map<string, boolean>()
-    for (const img of draft.canvas.images) out.set(img.id, resolveImageAnchor(img, document) !== undefined)
-    return out
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [anchorSignature, target])
   const hidden = rule !== undefined && /visibility\s*:\s*hidden/.test(rule)
   const removed = rule !== undefined && /display\s*:\s*none/.test(rule)
 
@@ -2493,6 +3994,7 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
       used('margin') ? 'margin: ' + margin + ' !important' : '',
       used('lineHeight') ? 'line-height: ' + lineHeight + ' !important' : '',
       used('opacity') ? 'opacity: ' + opacity + ' !important' : '',
+      used('zIndex') ? 'z-index: ' + zIndex + ' !important' : '',
       used('shadow') ? 'box-shadow: ' + shadow + ' !important' : '',
       used('textAlign') ? 'text-align: ' + textAlign + ' !important' : '',
     ].filter((s) => s !== '').join('; ')
@@ -2501,7 +4003,7 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
     // mere selection never marks the draft dirty.
     onSample(sel, decl)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fontSize, fontFamily, color, bg, bgImage, weight, radius, borderColor, borderWidth, padding, width, height, margin, lineHeight, opacity, shadow, textAlign, transX, transY, scale, touched])
+  }, [fontSize, fontFamily, color, bg, bgImage, weight, radius, borderColor, borderWidth, padding, width, height, margin, lineHeight, opacity, shadow, textAlign, zIndex, transX, transY, scale, touched])
 
   // A canvas grip drag writes the rule directly, so the panel mirrors it back — except
   // while one of these inputs has focus (that would rewrite the field mid-typing). The
@@ -2531,6 +4033,37 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
     onText(selectorOf(host), beforeRef.current, desired)
     setTextIssue(t('textApplied'))
   }
+  /** The 全站 scope for this selection, when it has one (see site-scope.ts). */
+  const siteGroup = site !== undefined && site.ok ? site.scope : undefined
+  /**
+   * Every rule that currently hides this component, whatever surface wrote it.
+   *
+   * Derived from the document's own css: the toggles are a view of what is written, so flipping
+   * one, restoring from the recycle bin and editing geek-mode CSS can never disagree. Rules from
+   * an older build are listed here too, which is what makes 「全部恢复显示」 a real undo.
+   */
+  const hideRules = siteGroup === undefined ? [] : hiddenRulesFor(draft.css, siteGroup.selector)
+  /**
+   * Whether the component can no longer be reached by clicking the page.
+   *
+   * Two ways to get there, and both deserve the warning: hiding it in every surface the card
+   * knows, or (the blunt one) 「移除控件」, which writes the identity itself with no surface at all.
+   */
+  const hiddenEverywhere = siteGroup !== undefined && (hideRules.some((entry) => entry.selector === siteGroup.selector)
+    || surfaces.every((surface) => hiddenInSurface(draft.css, surface, siteGroup.selector)))
+
+  /**
+   * Why 全站 is unavailable for this selection, in one sentence.
+   *
+   * Both ways it can fail are things the user can act on (pick an element that carries more of its
+   * own identity), so the button explains itself instead of just being greyed out.
+   */
+  const siteMissText = site === undefined || site.ok
+    ? t('scopeSiteHint')
+    : site.reason === 'too-generic'
+      ? t('scopeSiteTooGeneric').replace('{n}', String(site.count))
+      : t('scopeSiteNoIdentity')
+
   const fieldLabel: CSSProperties = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, fontSize: 12, lineHeight: '20px', width: '100%' }
 
   const style: CSSProperties = {
@@ -2551,7 +4084,7 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
           <Button style={btnBase} size="sm" variant="ghost" onClick={onSelectChild} title={t('selectChildHint')}>↓ {t('selectChild')}</Button>
         </div>
         <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelPrimary, wordBreak: 'break-word' }}>{elementLabel(target, 48)}</span>
-        {/* 编辑范围：单元素 / 整组（同类元素，含之后新建的） */}
+        {/* 编辑范围：单元素 / 整组（同类元素）/ 全站（同一个组件，出现在哪个界面都生效） */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{t('editScope')}</span>
           <span style={{ display: 'inline-flex', border: '1px solid ' + tok.borderL2, borderRadius: 8, overflow: 'hidden' }}>
@@ -2561,8 +4094,23 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
               onClick={() => { onScope('group') }}>
               {group === undefined ? t('scopeGroup') : t('scopeGroup') + ' · ' + t(groupLabelKey(group.kind)) + ' ' + String(group.count)}
             </Button>
+            <Button size="sm" variant={scope === 'site' ? 'primary' : 'ghost'} disabled={siteGroup === undefined}
+              title={siteGroup === undefined ? siteMissText : t('scopeSiteHint')}
+              onClick={() => { onScope('site') }}>
+              {siteGroup === undefined ? t('scopeSite') : t('scopeSite') + ' · ' + String(siteGroup.count)}
+            </Button>
           </span>
         </div>
+        {/* 全站：标识来自元素自身，不带祖先路径——所以其他界面的实例、之后新建的实例都跟着变。
+            只命中 1 处时要说清楚：这不是“只影响一个”。 */}
+        {scope === 'site' && siteGroup === undefined ? (
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.warn }}>{siteMissText}</span>
+        ) : null}
+        {scope === 'site' && siteGroup !== undefined ? (
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>
+            {siteGroup.count === 1 ? t('scopeSiteOne') : t('scopeSiteMany').replace('{n}', String(siteGroup.count))}
+          </span>
+        ) : null}
         {/* 整组：成员之间的间隔（用相邻兄弟选择器，只动彼此之间，不碰首元素与容器顶） */}
         {scope === 'group' ? (
           gapSelector === undefined ? (
@@ -2579,10 +4127,65 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
           )
         ) : null}
         <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('scopeWrites')}</span>
-        <span style={{ fontSize: 11, lineHeight: '16px', color: scope === 'group' ? tok.brand : tok.labelTertiary, fontFamily: 'var(--ds-font-family-code, monospace)', wordBreak: 'break-all' }}>{sel}</span>
+        <span style={{ fontSize: 11, lineHeight: '16px', color: scope === 'single' ? tok.labelTertiary : tok.brand, fontFamily: 'var(--ds-font-family-code, monospace)', wordBreak: 'break-all' }}>{sel}</span>
         {target.matches(COMPOSER_PLACEHOLDER_SELECTOR) ? (
           <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('placeholderTarget')}</span>
         ) : null}
+      </div>
+      {/* 界面显示：同一个组件在不同界面显示 / 隐藏。规则 = body:has(<界面标记>) + 组件标识（views.ts），
+          所以「每个界面各渲染一份」与「一个全局节点盖在所有界面上」两种插件形态都能管。
+          「常用」三个按钮是整状态的预设：只在本页显示 / 到处都不显示 / 全部恢复。 */}
+      <div className="dsh-myskin-card" style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ flex: 1, minWidth: 0, fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>{t('viewCard')}</span>
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>
+            {t('viewCurrent')}{inSettings ? settingsView.label : (pageView?.label ?? t('viewUnknown'))}
+          </span>
+        </div>
+        {surfaces.map((surface) => {
+          const hidden = siteGroup !== undefined && hiddenWhile(draft.css, surface, siteGroup.selector, surfaces)
+          const isPage = surface.id === pageView?.id
+          return (
+            <div key={surface.id} style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <span style={{ flex: '1 1 88px', minWidth: 0, fontSize: 12, lineHeight: '18px', color: tok.labelPrimary }} title={surface.marker}>
+                {isPage ? t('viewThisPage') + surface.label : surface.label}
+              </span>
+              <span style={{ display: 'inline-flex', border: '1px solid ' + tok.borderL2, borderRadius: 8, overflow: 'hidden' }}>
+                <Button size="sm" variant={hidden ? 'ghost' : 'primary'} disabled={siteGroup === undefined} title={surface.marker}
+                  onClick={() => { onSurfaceHidden(surface, false) }}>{t('viewShown')}</Button>
+                <Button size="sm" variant={hidden ? 'primary' : 'ghost'} disabled={siteGroup === undefined} title={surface.marker}
+                  onClick={() => { onSurfaceHidden(surface, true) }}>{t('viewHidden')}</Button>
+              </span>
+            </div>
+          )
+        })}
+        {pageView === undefined ? (
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.warn }}>{t('viewNoPageMarker')}</span>
+        ) : null}
+        {/* 常用预设：一次设定整个「哪里显示」状态，而不是逐个界面点。 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelTertiary }}>{t('viewPresets')}</span>
+          <Button style={btnBase} size="sm" variant="outline" disabled={siteGroup === undefined || pageView === undefined}
+            title={t('viewOnlyHereHint')}
+            onClick={() => { if (pageView !== undefined) onKeepOnly(pageView) }}>{t('viewOnlyHere')}</Button>
+          <Button style={btnBase} size="sm" variant="outline" disabled={siteGroup === undefined}
+            title={t('viewHideEverywhereHint')} onClick={onHideEverywhere}>{t('viewHideEverywhere')}</Button>
+          <Button style={btnBase} size="sm" variant="outline" disabled={siteGroup === undefined || hideRules.length === 0}
+            title={t('viewRestoreAllHint')} onClick={onRestoreAllHidden}>{t('viewRestoreAll')}</Button>
+        </div>
+        {hiddenEverywhere ? (
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.warn }}>{t('viewAllHidden')}</span>
+        ) : null}
+        <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('viewHint')}</span>
+        {siteGroup === undefined ? (
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.warn }}>{siteMissText}</span>
+        ) : hideRules.length === 0 ? (
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary, fontFamily: 'var(--ds-font-family-code, monospace)', wordBreak: 'break-all' }}>{siteGroup.selector}</span>
+        ) : (
+          <span style={{ fontSize: 11, lineHeight: '16px', color: tok.brand, fontFamily: 'var(--ds-font-family-code, monospace)', wordBreak: 'break-all' }}>
+            {t('viewRules')}{hideRules.map((entry) => entry.selector).join('  ')}
+          </span>
+        )}
       </div>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         <Button style={btnBase} size="sm" variant={geek ? 'primary' : 'ghost'} onClick={() => { setGeek(!geek) }}>{t('geekMode')}</Button>
@@ -2724,7 +4327,7 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
           <Input value={opacity} onChange={(e: ChangeEvent<HTMLInputElement>) => { setOpacity(e.target.value); touch('opacity') }} />
         </Field>
       </Section>
-      <Section title={t('groupTransform')} badge={previewTransform === '' ? undefined : t('customBadge')}>
+      <Section title={t('groupTransform')} badge={previewTransform === '' && !used('zIndex') ? undefined : t('customBadge')}>
         <Field label={t('fieldTransX')} clearTitle={t('clearField')} clearable={false} onClear={() => undefined}>
           <WheelNudge onStep={(direction, big) => { nudge('transX', direction, big) }}>
             <Input value={transX} placeholder="0" title={t('wheelHint')} onChange={(e: ChangeEvent<HTMLInputElement>) => { transformAuthored.current = true; setTransX(e.target.value); touch('transX') }} onFocus={() => { transformFocusRef.current = true }} onBlur={() => { transformFocusRef.current = false }} />
@@ -2746,6 +4349,45 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
         <Field label={t('scaleSlider')} clearTitle={t('clearField')} clearable={false} onClear={() => undefined}>
           <input type="range" min={20} max={300} step={1} value={Math.round(toNum(scale, 1) * 100)} onChange={(e) => { transformAuthored.current = true; setScale(String(Number(e.target.value) / 100)); touch('scale') }} style={{ flex: '1 1 120px', minWidth: 120 }} />
         </Field>
+        {/* 层级（z-index）：和位置放一起，因为「谁盖住谁」是同一个问题。常用值做成快捷键。 */}
+        <Field label={t('fieldZIndex')} clearTitle={t('clearField')} clearable={used('zIndex')} onClear={() => { clearField('zIndex', () => { setZIndex('') }) }}>
+          <WheelNudge onStep={(direction, big) => { setZIndex(String(stepValue(toNum(zIndex, 0), direction, big ? 10 : 1))); touch('zIndex') }}>
+            <Input value={zIndex} placeholder={t('zIndexAuto')} title={t('zIndexHint')} onChange={(e: ChangeEvent<HTMLInputElement>) => { setZIndex(e.target.value); touch('zIndex') }} />
+          </WheelNudge>
+          {Z_INDEX_PRESETS.map((value) => (
+            <Button key={value} style={btnBase} size="sm" variant="ghost" title={t('zIndexPresetHint')}
+              onClick={() => { setZIndex(String(value)); touch('zIndex') }}>{String(value)}</Button>
+          ))}
+        </Field>
+        {/* 层级诊断：z-index 只在「有重叠、且没被祖先的层叠上下文关住」时看得出来。
+            没变化时这三行直接说明是哪一种情况；置顶/置底按真实竞争者算出数字，点了必然有效果。 */}
+        {stacking === undefined ? null : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingTop: 4, borderTop: '1px solid ' + tok.borderL2 }}>
+            <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary, wordBreak: 'break-word' }}>
+              {t('zIndexNow')}z-index {stacking.zIndex} · position {stacking.position} · {t('zIndexContext')}
+              {stacking.context === undefined ? t('zIndexContextRoot') : elementLabel(stacking.context, 32) + '（' + (stacking.contextReason ?? '') + '）'}
+            </span>
+            {stacking.context !== undefined ? (
+              <span style={{ fontSize: 11, lineHeight: '16px', color: tok.warn }}>{t('zIndexTrapped')}</span>
+            ) : null}
+            {stacking.neighbours.length === 0 ? (
+              <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('zIndexNoOverlap')}</span>
+            ) : (
+              <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary, wordBreak: 'break-word' }}>
+                {t('zIndexNeighbours').replace('{n}', String(stacking.neighbours.length))}
+                {stacking.neighbours.map((entry) => ' · ' + entry.label + ' z=' + entry.zIndex).join('')}
+              </span>
+            )}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <Button style={btnBase} size="sm" variant="outline" title={t('zIndexTopHint')} onClick={() => { applyZIndex(String(stacking.above)) }}>
+                {t('zIndexTop').replace('{n}', String(stacking.above))}
+              </Button>
+              <Button style={btnBase} size="sm" variant="outline" title={t('zIndexBottomHint')} onClick={() => { applyZIndex(String(stacking.below)) }}>
+                {t('zIndexBottom').replace('{n}', String(stacking.below))}
+              </Button>
+            </div>
+          </div>
+        )}
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 }}>
           <Button style={btnBase} size="sm" variant="ghost" onClick={() => { transformAuthored.current = true; clearField('transX', () => { setTransX('') }); clearField('transY', () => { setTransY('') }); clearField('scale', () => { setScale('') }) }}>{t('resetTransform')}</Button>
           <span style={{ flex: '1 1 120px', minWidth: 0, fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('transformHint')}</span>
@@ -2779,78 +4421,7 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
       </Section>
       </>)}
 
-      {draft.canvas.images.length === 0 ? null : (
-        <div className="dsh-myskin-card" style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, fontSize: 12, lineHeight: '18px' }}>
-          <strong style={{ fontSize: 13, lineHeight: '20px', fontWeight: 500, color: tok.labelSecondary }}>{t('embedBg')}</strong>
-          {draft.canvas.images.map((img) => {
-            const anchor = anchorOf(img)
-            const host = resolveImageAnchor(img, document)
-            const ok = anchorResolves.get(img.id) === true
-            const selectStyle: CSSProperties = { background: tok.bgBase, color: tok.labelPrimary, border: '1px solid ' + tok.borderL2, borderRadius: 6, fontSize: 12, lineHeight: '18px', padding: '2px 6px' }
-            return (
-              <div key={img.id} style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 8, borderTop: '1px solid ' + tok.borderL2 }}>
-                <span title={img.selector} style={{ color: tok.labelTertiary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {ok && host !== undefined ? elementLabel(host, 30) : anchorLabel(anchor, t)}
-                </span>
-                {/* 锚定：图片跟随谁。元素=结构选择器；文字=跟着这段文案；内置组件=固定部位 */}
-                <div className="dsh-myskin-field" style={{ gap: 6 }}>
-                  <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('anchor')}</span>
-                  <select value={anchor.kind} title={t('anchorHint')} style={selectStyle}
-                    onChange={(e: ChangeEvent<HTMLSelectElement>) => { onEmbedAnchor(img.id, defaultAnchor(e.target.value as AnchorKind, img, target, groupAnchor)) }}>
-                    <option value="element">{t('anchorKindElement')}</option>
-                    <option value="text">{t('anchorKindText')}</option>
-                    <option value="component">{t('anchorKindComponent')}</option>
-                    {/* 整组：一张图贴到整类元素上（每条工作区行一张，含之后新建的） */}
-                    <option value="group" disabled={groupAnchor === undefined}>{t('anchorKindGroup')}</option>
-                  </select>
-                  {anchor.kind === 'component' ? (
-                    <select value={anchor.value} title={t('anchorHint')} style={{ ...selectStyle, flex: '1 1 90px', minWidth: 90 }}
-                      onChange={(e: ChangeEvent<HTMLSelectElement>) => { onEmbedAnchor(img.id, { kind: 'component', value: e.target.value }) }}>
-                      {ANCHOR_COMPONENTS.map((component) => (<option key={component.id} value={component.id}>{t(component.labelKey)}</option>))}
-                    </select>
-                  ) : (
-                    <Input value={anchor.value}
-                      title={anchor.kind === 'text' ? t('anchorTextHint') : t('anchorSelectorHint')}
-                      placeholder={anchor.kind === 'text' ? t('anchorTextPlaceholder') : t('anchorSelectorPlaceholder')}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) => { onEmbedAnchor(img.id, { kind: anchor.kind, value: e.target.value }) }} />
-                  )}
-                  {anchor.kind === 'element' ? (
-                    <Button style={btnBase} size="sm" variant="ghost" onClick={() => { onEmbedAnchor(img.id, anchorFromElement(target)) }}>{t('anchorUseSelected')}</Button>
-                  ) : null}
-                  {anchor.kind === 'text' ? (
-                    <Button style={btnBase} size="sm" variant="ghost" title={t('anchorUseTextHint')}
-                      onClick={() => { const copy = anchorTextOf(target); if (copy !== undefined) onEmbedAnchor(img.id, { kind: 'text', value: copy, label: copy }) }}>{t('anchorUseText')}</Button>
-                  ) : null}
-                </div>
-                <div className="dsh-myskin-field" style={{ gap: 6 }}>
-                  <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('imageMode')}</span>
-                  <select value={imageModeOf(img)} title={t('imageModeHint')} style={selectStyle}
-                    onChange={(e: ChangeEvent<HTMLSelectElement>) => { onEmbedMode(img.id, e.target.value as ImageMode) }}>
-                    <option value="embed">{t('imageModeEmbed')}</option>
-                    <option value="anchor">{t('imageModeAnchor')}</option>
-                  </select>
-                  <span style={{ flex: '1 1 120px', minWidth: 0, fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>
-                    {imageModeOf(img) === 'anchor' ? t('imageModeAnchorNote') : t('imageModeEmbedNote')}
-                  </span>
-                </div>
-                <span style={{ fontSize: 11, lineHeight: '16px', color: ok ? tok.success : tok.warn }}>
-                  {ok ? t('anchorOk') + ' · ' + anchorLabel(anchor, t) : t('anchorMissing')}
-                </span>
-                <div className="dsh-myskin-field" style={{ gap: 6 }}>
-                  <span style={{ color: tok.labelTertiary, minWidth: 40 }}>{t('opacity')}</span>
-                  <input type="range" min={0} max={100} value={Math.round((img.opacity ?? 1) * 100)} onChange={(e) => { onEmbedOpacity(img.id, Number(e.target.value) / 100) }} style={{ flex: '1 1 70px', minWidth: 70 }} />
-                  <span style={{ color: tok.labelTertiary }}>{t('blend')}</span>
-                  <select value={img.blend ?? 'normal'} onChange={(e) => { onEmbedBlend(img.id, e.target.value as BlendMode) }}
-                    style={{ background: tok.bgBase, color: tok.labelPrimary, border: '1px solid ' + tok.borderL2, borderRadius: 6, fontSize: 12, lineHeight: '18px', padding: '2px 6px' }}>
-                    {BLEND_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{t(o.labelKey)}</option>))}
-                  </select>
-                  <Button style={btnBase} size="sm" variant="ghost" icon={<IconTrash size={14} />} onClick={() => { onRemoveEmbed(img.id) }}>{t('remove')}</Button>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
+
 
     </div>
   )

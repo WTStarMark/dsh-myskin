@@ -121,6 +121,11 @@ test('helpers agree with each other', () => {
   assert.equal(pack.dataUrlMime('data:image/webp;base64,AAAA'), 'image/webp')
   assert.equal(pack.extForMime('font/woff2'), 'woff2')
   assert.equal(pack.mimeForPath('assets/font-1.woff2'), 'font/woff2')
+  // An animated GIF is embedded byte-for-byte (the editor never re-encodes one), so the package has
+  // to carry its real MIME and extension back out — otherwise a re-import hands the reader a
+  // mislabelled payload and the animation is the first thing to go.
+  assert.equal(pack.extForMime('image/gif'), 'gif')
+  assert.equal(pack.mimeForPath('assets/image-2.gif'), 'image/gif')
   assert.deepEqual(pack.dataUrlBytes('data:text/plain,hello'), new TextEncoder().encode('hello'))
   assert.deepEqual(pack.dataUrlBytes('data:image/png;base64,' + Buffer.from(IMAGE_BYTES).toString('base64')), IMAGE_BYTES)
   // CRC-32 of an empty payload is 0, of "123456789" it is the standard 0xCBF43926.

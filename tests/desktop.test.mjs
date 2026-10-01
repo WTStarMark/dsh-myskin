@@ -44,11 +44,24 @@ test('a plain browser reports no desktop shell and keeps the web editor inset', 
   // to <body> far below the chrome's z-index and used to open *behind* it. Hiding the chrome
   // would take the toolbar and panel away from a user who is still drawing, so the modal
   // layer is inset by exactly the space they occupy instead.
-  assert.match(rules, /^body > :not\(#root\):not\(\[data-dsh-myskin-ui\]\):has\(\[data-shortcut-modal\]\) \{$/m)
+  // Both dock layouts live in the SAME stylesheet and are gated on one <html> attribute, so a
+  // flip is an attribute write — the tag is written once at mount and never rewritten.
+  assert.match(rules, /^html\[data-dsh-myskin-dock='right'\] body > :not\(#root\):not\(\[data-dsh-myskin-ui\]\):has\(\[data-shortcut-modal\]\) \{$/m)
   assert.match(rules, /^ {2}top: calc\(var\(--dsh-myskin-chrome-top, 0px\) \+ var\(--dsh-myskin-inset-top, 48px\)\) !important;$/m)
-  assert.match(rules, /^ {2}right: var\(--dsh-myskin-inset-right, 340px\) !important;$/m)
+  assert.match(rules, /^ {2}right: var\(--dsh-myskin-inset-x, 340px\) !important;$/m)
+  assert.match(rules, /^html\[data-dsh-myskin-dock='left'\] body > :not\(#root\):not\(\[data-dsh-myskin-ui\]\):has\(\[data-shortcut-modal\]\) \{$/m)
+  assert.match(rules, /^ {2}left: var\(--dsh-myskin-inset-x, 340px\) !important;$/m)
+  // `--dsh-myskin-inset-x` is the width the panel occupies on the side it is docked to; the
+  // side-independent rules (the dialog's height and cap) read that one name.
+  assert.match(rules, /^html\[data-dsh-myskin-dock='right'\] \{ --dsh-myskin-inset-x: var\(--dsh-myskin-inset-right, 340px\); \}$/m)
+  assert.match(rules, /^html\[data-dsh-myskin-dock='left'\] \{ --dsh-myskin-inset-x: var\(--dsh-myskin-inset-left, 340px\); \}$/m)
+  assert.match(rules, /max-width: calc\(100vw - var\(--dsh-myskin-inset-x, 340px\) - 48px\)/)
   assert.doesNotMatch(rules, /data-dsh-myskin-canvas\] \{ display: none/)
   assert.match(rules, /margin-top: var\(--dsh-myskin-inset-top, 48px\)/)
+  // The page gives up exactly the panel's strip, on whichever side it is docked to.
+  assert.match(rules, /^html\[data-dsh-myskin-dock='right'\] body \{ margin-right: var\(--dsh-myskin-inset-x, 340px\) !important; \}$/m)
+  assert.match(rules, /^html\[data-dsh-myskin-dock='left'\] body \{ margin-left: var\(--dsh-myskin-inset-x, 340px\) !important; \}$/m)
+  assert.doesNotMatch(rules, /margin-(left|right): var\(--dsh-myskin-inset-(left|right), 340px\)/, 'the side is never hard-wired to one variable')
   assert.match(rules, /#root \{ height: 100% !important; \}/)
   assert.doesNotMatch(rules, /app-region/)
   assert.doesNotMatch(rules, /_frame/)
@@ -86,8 +99,29 @@ test('the Windows shell docks below the native caption instead of moving it', ()
   // The toolbar starts exactly where the frame's own caption padding ends, in
   // fullscreen too (--dsh-frame-chrome-top would collapse to 0 and leave a gap).
   assert.match(rules, /--dsh-myskin-chrome-top: var\(--dsh-windows-titlebar-height, 40px\)/)
-  assert.match(rules, /body \{ margin-right: var\(--dsh-myskin-inset-right, 340px\) !important; \}/)
+  assert.match(rules, /^html\[data-dsh-myskin-dock='right'\] body \{ margin-right: var\(--dsh-myskin-inset-x, 340px\) !important; \}$/m)
+  assert.match(rules, /^html\[data-dsh-myskin-dock='left'\] body \{ margin-left: var\(--dsh-myskin-inset-x, 340px\) !important; \}$/m)
   assert.doesNotMatch(rules, /margin-top/)
+})
+
+test('both dock layouts are present, and neither hard-wires a side', () => {
+  // The frame stylesheet is written ONCE when the editor mounts (see dock.ts). If a rule existed
+  // for only one side, flipping the dock would silently half-apply: page margin on the new side,
+  // stale geometry on the old one.
+  const window = setup()
+  const shell = desktop.readDesktopShell(window.document)
+  const rules = desktop.editorFrameRules(shell).join('\n')
+  for (const side of ['left', 'right']) {
+    // Inset variable, modal layer and page margin: three rules per side, all gated.
+    assert.equal((rules.match(new RegExp("html\\[data-dsh-myskin-dock='" + side + "'\\]", 'g')) ?? []).length, 3, side + ': inset variable + modal layer + page margin')
+  }
+  // The rules that MOVE something are all gated, so removing the attribute (editor unmount) undoes
+  // the whole layout — nothing can survive the editor and leave the page short of an edge.
+  const movers = rules.split('\n').filter((line) => /margin-(left|right):/.test(line) || /body > :not\(#root\)/.test(line))
+  assert.equal(movers.length, 4)
+  for (const line of movers) assert.match(line, /^html\[data-dsh-myskin-dock='(left|right)'\]/, 'ungated layout rule: ' + line)
+  // The dialog's own cap is side-independent on purpose: it reads the single inset width.
+  assert.match(rules, /\[data-shortcut-modal="settings"\] \{/)
 })
 
 test('the drag recall pulse runs on macOS and nowhere else', () => {

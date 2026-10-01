@@ -125,3 +125,16 @@ test('the font list rows cannot be shrunk out of existence', () => {
   assert.match(card[1], /flex:\s*none/)
 })
 
+test('a left-docked panel mirrors its motion and its edge', () => {
+  // The dock side is one attribute on <html> (dock.ts). Everything about the panel that is not the
+  // page inset has to follow it, or a flip would leave the panel entering from the wrong edge with
+  // its divider and shadow on the wrong side — the layout half of the same switch lives in
+  // desktop.ts and is asserted there.
+  const left = 'html[data-dsh-myskin-dock="left"] [data-dsh-myskin-canvas] .dsh-myskin-panel'
+  assert.ok(RULES.includes(left + ' { animation-name: dsh-myskin-slide-left; box-shadow: 12px 0 28px -24px rgba(0, 0, 0, .65) }'), 'the left panel mirrors its shadow')
+  assert.ok(RULES.includes(left + '[data-open="0"] { transform: translateX(-16px) }'), 'folding slides toward its own edge')
+  assert.match(RULES, /@keyframes dsh-myskin-slide-left \{ from \{ opacity: 0; transform: translateX\(-14px\) \}/)
+  // The right-docked defaults stay exactly as they were.
+  assert.match(RULES, /\.dsh-myskin-panel \{[^}]*box-shadow: -12px 0 28px -24px/)
+})
+

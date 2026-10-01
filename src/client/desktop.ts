@@ -18,6 +18,8 @@
  * encodes.
  */
 
+import { DOCK_ATTRIBUTE } from './dock.ts'
+
 /** Native window chrome the document reports. */
 export interface DesktopShell {
   /** True when an Electron preload marked the document (never in a plain browser). */
@@ -74,11 +76,18 @@ export function readDesktopShell(doc?: Document): DesktopShell {
  * toolbar and the right panel. The fix is the same rule the app itself follows — the modal
  * layer is inset by the space the chrome occupies, so the dialog lays out in the app area
  * and the user keeps drawing with the dialog open.
+ * The panel can be docked to either side (see dock.ts). Both layouts are written here at
+ * once, gated on the single `data-dsh-myskin-dock` attribute on `<html>`, and the width the
+ * panel occupies on ITS side is published as `--dsh-myskin-inset-x`: every rule whose geometry
+ * does not depend on the side (the toolbar's height, the panel's cap) reads that one name, and
+ * only the horizontal margin is written twice.
  * @param shell - the shell the document reported when the editor opened.
  * @returns the rules to write, in order.
  */
 export function editorFrameRules(shell: DesktopShell): string[] {
   const rules: string[] = []
+  rules.push('html[' + DOCK_ATTRIBUTE + "='right'] { --dsh-myskin-inset-x: var(--dsh-myskin-inset-right, 340px); }")
+  rules.push('html[' + DOCK_ATTRIBUTE + "='left'] { --dsh-myskin-inset-x: var(--dsh-myskin-inset-left, 340px); }")
   // Upstream modals portal to <body> as one full-viewport layer (`position: fixed; inset: 0`,
   // z-index 1000) while the drawing chrome sits at 9999, so the settings dialog opened UNDER
   // the toolbar and the right panel — a modal that visibly did not follow the same layout
@@ -89,9 +98,15 @@ export function editorFrameRules(shell: DesktopShell): string[] {
   // the mask covers just the app area.
   // `data-shortcut-modal` marks the settings surface (and ui-shortcuts the shortcut editor);
   // `:has()` is load-bearing upstream too (`.wSkVaW_header:where(:not(:has(.wSkVaW_tabs)))`).
-  rules.push('body > :not(#root):not([data-dsh-myskin-ui]):has([data-shortcut-modal]) {')
-  rules.push('  top: calc(var(--dsh-myskin-chrome-top, 0px) + var(--dsh-myskin-inset-top, 48px)) !important;')
-  rules.push('  right: var(--dsh-myskin-inset-right, 340px) !important;')
+  const modalLayer = 'body > :not(#root):not([data-dsh-myskin-ui]):has([data-shortcut-modal])'
+  const modalTop = '  top: calc(var(--dsh-myskin-chrome-top, 0px) + var(--dsh-myskin-inset-top, 48px)) !important;'
+  rules.push('html[' + DOCK_ATTRIBUTE + "='right'] " + modalLayer + ' {')
+  rules.push(modalTop)
+  rules.push('  right: var(--dsh-myskin-inset-x, 340px) !important;')
+  rules.push('}')
+  rules.push('html[' + DOCK_ATTRIBUTE + "='left'] " + modalLayer + ' {')
+  rules.push(modalTop)
+  rules.push('  left: var(--dsh-myskin-inset-x, 340px) !important;')
   rules.push('}')
   // The panel sizes itself against the viewport (`height: min(800px, calc(100vh - …))`,
   // `max-width: calc(100vw - 48px)`); inside an inset layer those no longer describe the box
@@ -99,7 +114,7 @@ export function editorFrameRules(shell: DesktopShell): string[] {
   // chrome. The 240px floor keeps it usable in a short window.
   rules.push('[data-shortcut-modal="settings"] {')
   rules.push('  height: min(800px, max(240px, calc(100vh - var(--dsh-myskin-chrome-top, 0px) - var(--dsh-myskin-inset-top, 48px) - 48px))) !important;')
-  rules.push('  max-width: calc(100vw - var(--dsh-myskin-inset-right, 340px) - 48px) !important;')
+  rules.push('  max-width: calc(100vw - var(--dsh-myskin-inset-x, 340px) - 48px) !important;')
   rules.push('}')
   if (shell.desktop) {
     if (shell.windowsTitlebar) {
@@ -115,17 +130,25 @@ export function editorFrameRules(shell: DesktopShell): string[] {
     }
     rules.push('[' + PLUGIN_UI_ATTRIBUTE + '] { -webkit-app-region: no-drag; app-region: no-drag; }')
   }
+  // The page gives up exactly the strip the panel occupies, on the side it is docked to. This is
+  // what keeps the app's own layout out of the panel's way — and what makes a viewport-fixed
+  // element stand out: it does NOT move with the body, which is precisely the case the editor
+  // reports (see occlusion.ts).
+  const margin = (side: 'left' | 'right', property: 'margin-left' | 'margin-right'): string =>
+    'html[' + DOCK_ATTRIBUTE + "='" + side + "'] body { " + property + ': var(--dsh-myskin-inset-x, 340px) !important; }'
   if (shell.windowsTitlebar) {
     // The frame already pads its caption row; adding the toolbar height moves
     // only the content, so the native caption buttons stay over the caption.
     rules.push('[class*="_frame"] { padding-top: calc(var(--dsh-windows-titlebar-height, 40px) + var(--dsh-myskin-inset-top, 48px)) !important; }')
-    rules.push('body { margin-right: var(--dsh-myskin-inset-right, 340px) !important; }')
+    rules.push(margin('right', 'margin-right'))
+    rules.push(margin('left', 'margin-left'))
   } else {
     rules.push('body {')
     rules.push('  margin-top: var(--dsh-myskin-inset-top, 48px) !important;')
-    rules.push('  margin-right: var(--dsh-myskin-inset-right, 340px) !important;')
     rules.push('  height: calc(100vh - var(--dsh-myskin-inset-top, 48px)) !important;')
     rules.push('}')
+    rules.push(margin('right', 'margin-right'))
+    rules.push(margin('left', 'margin-left'))
     rules.push('#root { height: 100% !important; }')
   }
   return rules

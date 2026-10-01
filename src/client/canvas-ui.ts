@@ -21,6 +21,8 @@
  * 8–12px radii, hairline `border-l2` dividers, layer surfaces for cards.
  */
 
+import { DOCK_ATTRIBUTE } from './dock.ts'
+
 /** Id of the editor's own style tag (also what tests assert on). */
 export const CANVAS_UI_STYLE_ID = 'dsh-myskin-canvas-ui'
 
@@ -42,6 +44,7 @@ export function canvasUiRules(): string {
   return [
     '@keyframes dsh-myskin-drop { from { opacity: 0; transform: translateY(-6px) } to { opacity: 1; transform: translateY(0) } }',
     '@keyframes dsh-myskin-slide { from { opacity: 0; transform: translateX(14px) } to { opacity: 1; transform: translateX(0) } }',
+    '@keyframes dsh-myskin-slide-left { from { opacity: 0; transform: translateX(-14px) } to { opacity: 1; transform: translateX(0) } }',
     '@keyframes dsh-myskin-pop { from { opacity: 0; transform: scale(.982) } to { opacity: 1; transform: scale(1) } }',
     '@keyframes dsh-myskin-fade { from { opacity: 0 } to { opacity: 1 } }',
     '@keyframes dsh-myskin-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .35 } }',
@@ -54,6 +57,11 @@ export function canvasUiRules(): string {
     // the whole app on every frame.
     '[data-dsh-myskin-canvas] .dsh-myskin-panel { animation: dsh-myskin-slide 190ms var(--dsh-myskin-ease) both; transition: opacity 140ms ease, transform 140ms ease; box-shadow: -12px 0 28px -24px rgba(0, 0, 0, .65) }',
     '[data-dsh-myskin-canvas] .dsh-myskin-panel[data-open="0"] { opacity: 0; transform: translateX(16px) }',
+    // Docked left, the panel mirrors: it enters from its own edge, its shadow falls the other way
+    // and folding it away slides it toward that edge. Gated on the same <html> attribute the frame
+    // rules use (dock.ts), so there is one answer to "which side is it on" for the whole editor.
+    'html[' + DOCK_ATTRIBUTE + '="left"] [data-dsh-myskin-canvas] .dsh-myskin-panel { animation-name: dsh-myskin-slide-left; box-shadow: 12px 0 28px -24px rgba(0, 0, 0, .65) }',
+    'html[' + DOCK_ATTRIBUTE + '="left"] [data-dsh-myskin-canvas] .dsh-myskin-panel[data-open="0"] { transform: translateX(-16px) }',
     // `flex: none`: a card is a block of content, not a rubber band. Without it a tall card in
     // the height-constrained panel is squeezed (its own `overflow` drops its automatic minimum
     // size to 0) instead of letting the panel scroll.

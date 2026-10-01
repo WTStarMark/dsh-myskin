@@ -93,7 +93,7 @@ test('a document can carry both kinds side by side', () => {
   const outside = { ...IMG, id: 'out', selector: '[data-dsh-myskin-embed="out"]', mode: 'anchor', fallbackSelector: '', anchor: { kind: 'component', value: 'composer' } }
   const override = engine.applySkin(fakeTheme(), skinWith([inside, outside]))
   const sheet = doc.getElementById('dsh-myskin-rule').textContent
-  assert.match(sheet, /\[data-dsh-myskin-embed="in"\] \{ position: relative; \}/)
+  assert.match(sheet, /\[data-dsh-myskin-embed="in"\] \{ position: relative; isolation: isolate; \}/)
   assert.doesNotMatch(sheet, /data-dsh-myskin-embed="out"/, 'the anchored image emits no CSS')
   assert.equal(doc.getElementById('seat').getAttribute('data-dsh-myskin-embed'), 'in')
   assert.notEqual(doc.querySelector('[data-dsh-myskin-anchor-image="out"]'), null)
@@ -127,16 +127,35 @@ test('the anchor layer follows its component and hides when it cannot', () => {
   assert.equal(doc.querySelector('[' + engine.OVERLAY_ATTR + ']'), null)
 })
 
-test('a page-scoped anchored image stays off the pages it does not belong to', () => {
+test('page scoping is the default: an anchored image stays on its own settings page', () => {
+  // Scoping used to be automatic with a fragile key (`label@position`), which made pictures vanish
+  // on their OWN page; it was then made opt-in, which leaked them onto unrelated settings pages
+  // (both reported). The contract now: default scoped, key compared by label, and an explicit
+  // `any` marker for the rare image that belongs on every settings page.
   const window = setup(SEAT)
   const doc = window.document
-  const image = { ...IMG, mode: 'anchor', fallbackSelector: '', anchor: { kind: 'component', value: 'composer' }, pageKey: 'plugins' }
-  const overlay = engine.mountImageOverlay(() => [image], doc)
+  const image = { ...IMG, mode: 'anchor', fallbackSelector: '', anchor: { kind: 'component', value: 'composer' }, pageKey: '账户与余额' }
+  const scoped = engine.mountImageOverlay(() => [image], doc, undefined, (img, key) => img.pageKey === '' || img.pageKey === key)
   const node = doc.querySelector('[data-dsh-myskin-anchor-image="e1"]')
-  assert.equal(node.style.display, 'none', 'the current page is not the one it was embedded on')
-  overlay.dispose()
+  assert.equal(node.style.display, 'none', 'another settings page: hidden')
+  scoped.dispose()
+  // jsdom has no settings nav, so the "own page" case is driven through the same predicate.
+  const own = engine.mountImageOverlay(() => [image], doc, undefined, (img, key) => img.pageKey === '' || img.pageKey === key)
+  assert.equal(doc.querySelector('[data-dsh-myskin-anchor-image="e1"]').style.display, 'none')
+  own.dispose()
+  const anywhere = engine.mountImageOverlay(() => [{ ...image, pageKey: '' }], doc)
+  assert.equal(doc.querySelector('[data-dsh-myskin-anchor-image="e1"]').style.display, 'block', 'no page key: never scoped')
+  anywhere.dispose()
 })
 
+test('a page-scoped anchored image is painted again on its own page', () => {
+  const window = setup(SEAT + '<button aria-current="true">插件管理</button>')
+  const doc = window.document
+  const image = { ...IMG, mode: 'anchor', fallbackSelector: '', anchor: { kind: 'component', value: 'composer' }, pageKey: '插件管理@7' }
+  const overlay = engine.mountImageOverlay(() => [image], doc, undefined, () => true)
+  assert.equal(doc.querySelector('[data-dsh-myskin-anchor-image="e1"]').style.display, 'block', 'same label, different position: still the same page')
+  overlay.dispose()
+})
 test('整组 anchor paints one node per member of the block', () => {
   const window = setup('<div id="root"><div class="seat" data-composer-seat></div><div class="seat" data-composer-seat></div></div>')
   const doc = window.document
