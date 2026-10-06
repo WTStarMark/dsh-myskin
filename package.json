@@ -1,7 +1,7 @@
 {
   "name": "dsh-myskin",
-  "description": "DSH 通用皮肤框架：可视化自定义 + 实时预览 + 「皮肤管理」，可以随心设计你的专属皮肤，并通过分发皮肤包和你的小伙伴们分享。非侵入式、可逆覆盖层，适配 DSH 0.1.7-rc.2 / 0.2.0-rc.1 / 0.2.0-rc.2（Web 与 Desktop 共用同一条客户端插件管线）。",
-  "version": "0.4.0",
+  "description": "DSH 全兼容皮肤可视化编辑框架：可视化自定义 + 「皮肤管理」，可以随心设计你的专属皮肤，并通过分发 .dshframework 皮肤包和你的小伙伴们分享。非侵入式、可逆覆盖层，适配 DSH 0.1.7-rc.2 / 0.2.0-rc.1 / 0.2.0-rc.2（Web 与 Desktop 共用同一条客户端插件管线），已声明兼容适配 dsh-wallpaper-engine。",
+  "version": "0.4.1",
   "license": "MIT",
   "author": "WTStarMark <2182219890@qq.com>",
   "repository": { "type": "git", "url": "git+https://github.com/WTStarMark/dsh-myskin.git" },
@@ -39,7 +39,8 @@
     "watch": "node scripts/build.cjs --watch",
     "test": "node --test tests/*.test.mjs",
     "check:compat": "node scripts/check-compat.mjs",
-    "check:types": "node scripts/check-types.mjs"
+    "check:types": "node scripts/check-types.mjs",
+    "pack:share": "node scripts/build.cjs && node scripts/pack-share.mjs"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "~3.18.4"

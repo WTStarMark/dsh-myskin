@@ -14,7 +14,7 @@
  * (what the editor does on unmount) takes the whole frame with it.
  *
  * The preference is remembered in browser storage: it is a property of the user's page, not of
- * the skin (it never enters the skin document, so it cannot travel inside a `.dshskin` or need
+ * the skin (it never enters the skin document, so it cannot travel inside a `.dshframework` or need
  * a schema the running Host might not know yet).
  */
 

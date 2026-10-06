@@ -13,6 +13,7 @@ package-lock.json
 *.part
 *.tar.gz
 *.dshskin
+*.dshframework
 dsh-myskin-*/
 dsh-myskin-repo-*/
 

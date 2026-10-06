@@ -11,7 +11,7 @@ import { JSDOM } from 'jsdom'
 import { loadTs } from './helpers/load-ts.mjs'
 
 const engine = await loadTs('src/client/skin-engine.ts')
-const pack = await loadTs('src/client/dshskin.ts')
+const pack = await loadTs('src/client/dshframework.ts')
 const anchors = await loadTs('src/client/anchors.ts')
 const locales = await loadTs('src/client/locales.ts')
 

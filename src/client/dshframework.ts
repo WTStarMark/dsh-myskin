@@ -1,13 +1,13 @@
 /**
- * `.dshskin` — the skin package format.
+ * `.dshframework` — the skin package format.
  *
  * A skin is a document PLUS the bytes it references: wallpapers, embedded images,
  * embedded font files. Kept as plain JSON those bytes ride along as base64 data URLs —
  * ~33 % bigger, unreadable, and impossible to swap for a different picture without
- * touching the document. A `.dshskin` is a normal ZIP that keeps them apart:
+ * touching the document. A `.dshframework` is a normal ZIP that keeps them apart:
  *
  *     manifest.json            the whole skin document, each payload replaced by
- *                              `dshskin:assets/<file>`
+ *                              `dshframework:assets/<file>`
  *     assets/image-1.webp      the payloads, as real files with their real bytes
  *     assets/font-1.woff2
  *     README.txt               what this file is, for whoever opens it in 7-Zip
@@ -17,17 +17,30 @@
  * browser half. Reading accepts STORE **and** DEFLATE, so a package repacked by a normal
  * zip tool still imports. No dependency, no schema change: the asset references only ever
  * exist inside the file, the live document always carries data URLs.
+ *
+ * The previous name (`.dshskin`: manifest `format: "dshskin"`, assets referenced as
+ * `dshskin:assets/…`) still IMPORTS — a file somebody already has on disk must not stop working
+ * because we renamed it — while everything written from here on uses the new one.
  */
 import { parseSkin, type SkinSettings } from '../skin-schema.ts'
 
 /** Value of the manifest's `format` field. */
-export const DSHSKIN_FORMAT = 'dshskin'
+export const FRAMEWORK_FORMAT = 'dshframework'
+/** `format` value of packages written under the previous name; accepted on import only. */
+export const LEGACY_FORMAT = 'dshskin'
 /** File extension (with dot). */
-export const DSHSKIN_EXTENSION = '.dshskin'
+export const FRAMEWORK_EXTENSION = '.dshframework'
+/**
+ * What the import picker accepts: the current extension, the previous one (files on disk stay
+ * usable), a plain `.zip` (the container IS a zip, so a repacked one must import) and JSON.
+ */
+export const IMPORT_ACCEPT = '.dshframework,.dshskin,.zip,application/json,.json'
 /** Version of the container/manifest layout this build writes and understands. */
-export const DSHSKIN_VERSION = 1
+export const FRAMEWORK_VERSION = 1
 /** Prefix that marks an asset reference inside the packed document. */
-export const ASSET_REF_PREFIX = 'dshskin:'
+export const ASSET_REF_PREFIX = 'dshframework:'
+/** Prefix of the previous name, still resolved on import. */
+export const LEGACY_ASSET_REF_PREFIX = 'dshskin:'
 /** Path of the document inside the package. */
 export const MANIFEST_PATH = 'manifest.json'
 /** Path of the human-readable note inside the package. */
@@ -36,7 +49,7 @@ export const README_PATH = 'README.txt'
 export const ASSET_DIR = 'assets'
 
 /** One payload carried by a package. */
-export interface DshSkinAsset {
+export interface FrameworkAsset {
   /** Package-relative path, e.g. `assets/image-1.webp`. */
   path: string
   /** What it is used for (derived from the MIME type). */
@@ -48,8 +61,9 @@ export interface DshSkinAsset {
 }
 
 /** `manifest.json` of a package. */
-export interface DshSkinManifest {
-  format: typeof DSHSKIN_FORMAT
+export interface FrameworkManifest {
+  /** `dshframework`, or `dshskin` for a package written under the previous name. */
+  format: string
   /** Container layout version. */
   formatVersion: number
   /** What wrote the file, e.g. `dsh-myskin 0.3.8`. */
@@ -59,7 +73,7 @@ export interface DshSkinManifest {
   /** ISO timestamp of packing. */
   createdAt: string
   /** Every payload, with its type and size. */
-  assets: DshSkinAsset[]
+  assets: FrameworkAsset[]
   /** Counts of the document's own parts, so a reader can see what is inside. */
   stats: Record<string, number>
   /** The skin document, with data URLs replaced by {@link ASSET_REF_PREFIX} references. */
@@ -67,15 +81,15 @@ export interface DshSkinManifest {
 }
 
 /** Result of {@link packSkin}. */
-export interface DshSkinPackage {
+export interface FrameworkPackage {
   bytes: Uint8Array
-  manifest: DshSkinManifest
+  manifest: FrameworkManifest
 }
 
 /** Result of {@link unpackSkin}. */
-export interface DshSkinContents {
+export interface FrameworkContents {
   skin: SkinSettings
-  manifest: DshSkinManifest
+  manifest: FrameworkManifest
 }
 
 /**
@@ -207,7 +221,7 @@ export function mimeForPath(path: string): string | undefined {
  * @param mime - the MIME type.
  * @returns image, font, or file.
  */
-function kindForMime(mime: string): DshSkinAsset['kind'] {
+function kindForMime(mime: string): FrameworkAsset['kind'] {
   if (mime.startsWith('image/')) return 'image'
   if (mime.startsWith('font/') || mime.includes('font-')) return 'font'
   return 'file'
@@ -437,31 +451,45 @@ function mapStrings<T>(value: T, map: (input: string) => string): T {
 }
 
 /**
- * Replace every `dshskin:` reference inside one string with its data URL.
+ * Replace every asset reference inside one string with its data URL.
  *
  * A hand-written scan rather than a built-from-a-string RegExp: references also appear
- * INSIDE CSS rules (`url('dshskin:assets/font-1.woff2')`), where the terminating character
+ * INSIDE CSS rules (`url('dshframework:assets/font-1.woff2')`), where the terminating character
  * is whatever the surrounding CSS uses, and an escaping bug here silently imports a
  * package with empty assets.
  * @param value - the packed string.
+ * @param prefix - the reference prefix to resolve.
  * @param urlFor - resolves one asset path to its data URL.
  * @returns the rehydrated string.
  */
-function replaceAssetRefs(value: string, urlFor: (path: string) => string): string {
-  if (!value.includes(ASSET_REF_PREFIX)) return value
+function replacePrefix(value: string, prefix: string, urlFor: (path: string) => string): string {
+  if (!value.includes(prefix)) return value
   let out = ''
   let rest = value
   for (;;) {
-    const at = rest.indexOf(ASSET_REF_PREFIX)
+    const at = rest.indexOf(prefix)
     if (at < 0) return out + rest
     out += rest.slice(0, at)
-    const after = rest.slice(at + ASSET_REF_PREFIX.length)
+    const after = rest.slice(at + prefix.length)
     const end = after.search(/[\s'")]/)
     const path = end < 0 ? after : after.slice(0, end)
     out += urlFor(path)
     if (end < 0) return out
     rest = after.slice(end)
   }
+}
+
+/**
+ * Rehydrate one packed string.
+ *
+ * Both prefixes are resolved — the current one and the previous name's — so a package written by an
+ * older build (or hand-edited from one) still comes back whole.
+ * @param value - the packed string.
+ * @param urlFor - resolves one asset path to its data URL.
+ * @returns the rehydrated string.
+ */
+function replaceAssetRefs(value: string, urlFor: (path: string) => string): string {
+  return replacePrefix(replacePrefix(value, ASSET_REF_PREFIX, urlFor), LEGACY_ASSET_REF_PREFIX, urlFor)
 }
 
 /**
@@ -481,7 +509,7 @@ function skinStats(skin: SkinSettings): Record<string, number> {
 }
 
 /**
- * Pack one skin document into a `.dshskin`.
+ * Pack one skin document into a `.dshframework`.
  * @param skin - the document to pack (data URLs are extracted into assets).
  * @param options - package metadata.
  * @returns the archive bytes plus the manifest that was written.
@@ -489,7 +517,7 @@ function skinStats(skin: SkinSettings): Record<string, number> {
 export function packSkin(
   skin: SkinSettings,
   options: { name: string; generator: string; createdAt?: string },
-): DshSkinPackage {
+): FrameworkPackage {
   const payloads: Array<{ path: string; mime: string; bytes: Uint8Array }> = []
   const seen = new Map<string, string>()
   let counter = 0
@@ -505,9 +533,9 @@ export function packSkin(
     return ASSET_REF_PREFIX + path
   }
   const packed = mapStrings(skin, (value) => refString(value, refFor))
-  const manifest: DshSkinManifest = {
-    format: DSHSKIN_FORMAT,
-    formatVersion: DSHSKIN_VERSION,
+  const manifest: FrameworkManifest = {
+    format: FRAMEWORK_FORMAT,
+    formatVersion: FRAMEWORK_VERSION,
     generator: options.generator,
     name: options.name,
     createdAt: options.createdAt ?? new Date().toISOString(),
@@ -516,14 +544,15 @@ export function packSkin(
     skin: packed,
   }
   const readme = [
-    'dshskin — DSH 皮肤包 / DSH skin package',
+    'dshframework — DSH 皮肤包 / DSH skin package',
     '',
     '这是一个 ZIP 容器（本包用 STORE 未压缩写入，任何解压工具都能打开）：',
     '  manifest.json  皮肤文档（图片/字体等已抽成 assets/ 下的引用）',
     '  assets/*       真实字节的资源文件，可直接替换成自己的图/字体',
     '  README.txt     本说明',
     '',
-    '重新打包后仍可导入：manifest.json 里的引用形如 dshskin:assets/image-1.webp，',
+    '重新打包后仍可导入：manifest.json 里的引用形如 dshframework:assets/image-1.webp，',
+    '（旧版 .dshskin 包里的 dshskin: 引用同样能导入，两种写法都认。）',
     '把同名文件换掉即可（扩展名保持一致的格式，例如 .webp 换 .webp）。',
     '导入口在 DSH 设置 →「皮肤管理」→ 导入皮肤。',
     '',
@@ -540,7 +569,7 @@ export function packSkin(
 }
 
 /**
- * Unpack a `.dshskin` (or a legacy JSON export) into a skin document.
+ * Unpack a `.dshframework` package — or the previous `.dshskin` name, or a legacy JSON export — into a skin document.
  *
  * Legacy files stay importable on purpose: the JSON export existed for several releases
  * and users have them on disk.
@@ -548,14 +577,14 @@ export function packSkin(
  * @returns the document and (for packages) the manifest.
  * @throws Error with a readable message when the file cannot be read.
  */
-export async function unpackSkin(bytes: Uint8Array): Promise<DshSkinContents> {
+export async function unpackSkin(bytes: Uint8Array): Promise<FrameworkContents> {
   if (!isZip(bytes)) {
     // Legacy JSON export: data URLs already inside, nothing to rehydrate.
     const parsed = JSON.parse(textDecoder.decode(bytes)) as SkinSettings
     return {
       skin: parseSkin(parsed),
       manifest: {
-        format: DSHSKIN_FORMAT,
+        format: LEGACY_FORMAT,
         formatVersion: 0,
         generator: 'legacy json',
         name: 'dsh-myskin.json',
@@ -569,9 +598,12 @@ export async function unpackSkin(bytes: Uint8Array): Promise<DshSkinContents> {
   const files = await unzip(bytes)
   const manifestBytes = files.get(MANIFEST_PATH)
   if (manifestBytes === undefined) throw new Error('missing ' + MANIFEST_PATH)
-  const manifest = JSON.parse(textDecoder.decode(manifestBytes)) as DshSkinManifest
-  if (manifest.format !== DSHSKIN_FORMAT) throw new Error('not a ' + DSHSKIN_FORMAT + ' package')
-  if (typeof manifest.formatVersion !== 'number' || manifest.formatVersion > DSHSKIN_VERSION) {
+  const manifest = JSON.parse(textDecoder.decode(manifestBytes)) as FrameworkManifest
+  // Both names import: `dshframework` is what we write, `dshskin` is what earlier builds wrote.
+  if (manifest.format !== FRAMEWORK_FORMAT && manifest.format !== LEGACY_FORMAT) {
+    throw new Error('not a ' + FRAMEWORK_FORMAT + ' package')
+  }
+  if (typeof manifest.formatVersion !== 'number' || manifest.formatVersion > FRAMEWORK_VERSION) {
     throw new Error('package needs a newer dsh-myskin (format v' + String(manifest.formatVersion) + ')')
   }
   const mimes = new Map((manifest.assets ?? []).map((asset) => [asset.path, asset.mime]))

@@ -1,17 +1,19 @@
 /**
- * The `.dshskin` package: document + real asset files inside a zip.
+ * The `.dshframework` package: document + real asset files inside a zip.
  *
  * Round-trip is the whole promise (pack → unpack must give the document back byte for
  * byte), and the container has to stay a REAL zip that other tools can open — that is
  * verified here with a deflated archive built by node's zlib, which is exactly what a
- * third-party re-pack looks like to our reader.
+ * third-party re-pack looks like to our reader. The PREVIOUS name (`.dshskin`: format field
+ * and `dshskin:` asset references) has to keep importing, because a file already on disk does
+ * not care that we renamed the format.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { deflateRawSync } from 'node:zlib'
 import { loadTs } from './helpers/load-ts.mjs'
 
-const pack = await loadTs('src/client/dshskin.ts')
+const pack = await loadTs('src/client/dshframework.ts')
 
 /** A 1x1 transparent webp-ish payload (bytes only; the format never parses them). */
 const IMAGE_BYTES = new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4])
@@ -39,7 +41,7 @@ function document() {
   }
 }
 
-test('a whole document round-trips through a .dshskin', async () => {
+test('a whole document round-trips through a .dshframework', async () => {
   const skin = document()
   const { bytes, manifest } = pack.packSkin(skin, { name: '测试皮肤', generator: 'dsh-myskin test' })
   assert.equal(pack.isZip(bytes), true)
@@ -78,14 +80,14 @@ test('packing keeps non-data URLs untouched and the zip carries a manifest + rea
 
 test('a real deflated zip (what a third-party re-pack looks like) still imports', async () => {
   const manifest = {
-    format: 'dshskin',
+    format: 'dshframework',
     formatVersion: 1,
     generator: 'other tool',
     name: 'repacked',
     createdAt: '2026-01-01T00:00:00.000Z',
     assets: [{ path: 'assets/image-1.png', kind: 'image', mime: 'image/png', bytes: IMAGE_BYTES.length }],
     stats: {},
-    skin: { enabled: true, tokens: {}, css: [], text: [], canvas: { background: 'dshskin:assets/image-1.png', images: [] }, layers: [], library: [] },
+    skin: { enabled: true, tokens: {}, css: [], text: [], canvas: { background: 'dshframework:assets/image-1.png', images: [] }, layers: [], library: [] },
   }
   const archive = deflatedZip([
     { path: 'manifest.json', bytes: new TextEncoder().encode(JSON.stringify(manifest)) },
@@ -116,8 +118,38 @@ test('integrity and legacy files are handled honestly', async () => {
   await assert.rejects(() => pack.unpackSkin(new TextEncoder().encode('not json')), SyntaxError)
 })
 
+test('a package written under the previous name still imports whole', async () => {
+  // Exactly what an older build wrote: format field 'dshskin', assets referenced as 'dshskin:…'.
+  const legacyManifest = {
+    format: 'dshskin',
+    formatVersion: 1,
+    generator: 'dsh-myskin 0.4.0',
+    name: '旧的包',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    assets: [{ path: 'assets/image-1.png', kind: 'image', mime: 'image/png', bytes: IMAGE_BYTES.length }],
+    stats: {},
+    skin: { enabled: true, tokens: {}, css: [], text: [], canvas: { background: 'dshskin:assets/image-1.png', images: [] }, layers: [], library: [] },
+  }
+  const archive = deflatedZip([
+    { path: 'manifest.json', bytes: new TextEncoder().encode(JSON.stringify(legacyManifest)) },
+    { path: 'assets/image-1.png', bytes: IMAGE_BYTES },
+  ])
+  const back = await pack.unpackSkin(archive)
+  assert.equal(back.skin.canvas.background, pack.bytesToDataUrl(IMAGE_BYTES, 'image/png'), 'the OLD reference resolves')
+  assert.equal(back.manifest.format, 'dshskin', 'and the manifest keeps saying what it said')
+  // What we write from here on carries the new name in both places.
+  const { bytes, manifest } = pack.packSkin(document(), { name: 'new', generator: 'g' })
+  assert.equal(manifest.format, 'dshframework')
+  const text = new TextDecoder().decode((await pack.unzip(bytes)).get('manifest.json'))
+  assert.match(text, /dshframework:assets\//)
+  assert.doesNotMatch(text, /"dshskin:assets/)
+})
+
 test('helpers agree with each other', () => {
-  assert.equal(pack.DSHSKIN_FORMAT, 'dshskin')
+  assert.equal(pack.FRAMEWORK_FORMAT, 'dshframework')
+  assert.equal(pack.FRAMEWORK_EXTENSION, '.dshframework')
+  assert.equal(pack.ASSET_REF_PREFIX, 'dshframework:')
+  assert.equal(pack.LEGACY_FORMAT, 'dshskin')
   assert.equal(pack.dataUrlMime('data:image/webp;base64,AAAA'), 'image/webp')
   assert.equal(pack.extForMime('font/woff2'), 'woff2')
   assert.equal(pack.mimeForPath('assets/font-1.woff2'), 'font/woff2')

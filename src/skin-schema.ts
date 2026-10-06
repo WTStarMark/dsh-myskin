@@ -144,6 +144,23 @@ export interface SkinCanvas {
   backgroundOpacity?: number
   images: EmbeddedImage[]
 }
+/**
+ * The identity document to RESTORE TO — the native look, with the user's skin library kept.
+ *
+ * 「还原默认」 means "back to DSH's own look", not "delete the skins I saved": the library is user
+ * data (named skins, each with its own canvas and images), not part of the current look, so a
+ * one-click reset must not destroy it. {@link EMPTY_SKIN} stays the truly empty document — what a
+ * missing or unreadable document falls back to.
+ * @param current - the document being reset; its library is carried over.
+ * @returns a fresh identity document, safe to store.
+ */
+export function resetSkin(current?: SkinSettings): SkinSettings {
+  const identity = cloneSkin(EMPTY_SKIN)
+  if (current === undefined) return identity
+  // cloneSkin does the deep copy of the entries themselves (they carry their own canvas/images).
+  return cloneSkin({ ...identity, library: current.library ?? [] })
+}
+
 /** One saved, named skin in the library. */
 export interface NamedSkin {
   id: string

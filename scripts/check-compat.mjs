@@ -209,10 +209,18 @@ function checkInstall(dshRoot) {
   //    light palette, selectors anchored at #root would match nothing, the
   //    workspace-tree decorator would stop tagging). Scan every @deepseek-ai
   //    package the install ships, not just one.
-  let storeText
-  /** @returns the concatenated text of every @deepseek-ai package in this install. */
-  function storeSource() {
-    if (storeText !== undefined) return storeText
+  let storeChunks
+  /**
+   * Every @deepseek-ai package text in this install, one package per element.
+   *
+   * Deliberately NOT joined into a single string: an install that carries several DSH
+   * generations (0.1.5 + 0.1.7 + 0.2.0 side by side in the pnpm store) passes V8's maximum
+   * string length, and `join` then throws RangeError before a single contract is checked.
+   * A needle can only ever live inside one package, so scanning them one by one is equivalent.
+   * @returns the chunk list, cached for the run.
+   */
+  function storeChunksOf() {
+    if (storeChunks !== undefined) return storeChunks
     const chunks = []
     for (const entry of fs.readdirSync(store)) {
       if (!entry.startsWith('@deepseek-ai+dsh-') && !entry.startsWith('@deepseek-ai+cordis@')) continue
@@ -220,8 +228,16 @@ function checkInstall(dshRoot) {
       if (!fs.existsSync(scopeDir)) continue
       for (const name of fs.readdirSync(scopeDir)) chunks.push(tree(path.join(scopeDir, name)))
     }
-    storeText = chunks.join(String.fromCharCode(10))
-    return storeText
+    storeChunks = chunks
+    return storeChunks
+  }
+  /**
+   * Whether this install ships a literal anywhere in its @deepseek-ai packages.
+   * @param needle - the literal to find.
+   * @returns true when some package carries it.
+   */
+  function storeHas(needle) {
+    return storeChunksOf().some((text) => text.includes(needle))
   }
   /**
    * Assert this install still renders one attribute our engine/editor reads.
@@ -229,7 +245,7 @@ function checkInstall(dshRoot) {
    * @param label - check label.
    */
   function checkContract(needle, label) {
-    if (storeSource().includes(needle)) ok(label)
+    if (storeHas(needle)) ok(label)
     else bad(label + ' missing "' + needle + '"')
   }
   checkContract('data-ds-dark-theme', 'dark-palette marker (body[data-ds-dark-theme])')
@@ -248,7 +264,7 @@ function checkInstall(dshRoot) {
   checkContract('role="tree"', 'workspace tree role ([role=\'tree\'])')
   checkContract('aria-selected', 'tree selection attribute')
   checkContract('aria-expanded', 'tree expansion attribute')
-  if (storeSource().includes('position:fixed;inset:0')) note('modal layers are full-viewport fixed layers (what the editor insets)')
+  if (storeHas('position:fixed;inset:0')) note('modal layers are full-viewport fixed layers (what the editor insets)')
   else bad('no full-viewport fixed modal layer found: the editor can no longer inset upstream modals')
   checkContract('id="root"', 'app root id (#root selectors)')
   // The client bundle is wrapped as window.__ModuleLoader__.load({ id, factory });

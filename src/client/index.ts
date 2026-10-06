@@ -21,6 +21,7 @@ import { MySkinSection, type MySkinSectionInjected } from './MySkinSection.tsx'
 import { zh, en, type MySkinKey } from './locales.ts'
 import { SKIN_SETTINGS_NAMESPACE, LEGACY_SETTINGS_NAMESPACE, type SkinSettings } from '../skin-schema.ts'
 import { applySkin, currentSkin, type SkinOverride } from './skin-engine.ts'
+import { observeWallpaperEngine } from './interop.ts'
 
 /** Dictionary namespace owned by this plugin. */
 export const SETTINGS_NS = 'settings.dsh-myskin'
@@ -84,6 +85,11 @@ export function apply(ctx: ClientContext): void {
       override = value.enabled ? applySkin(theme, value) : undefined
     }
     const offSnapshot = scope.subscribe(apply)
+    // Interop (see ./interop.ts): the wallpaper plugin may put its wallpaper back (or the user may
+    // pick one) while this skin is applied. Whether we paint our own wallpaper depends on that
+    // marker, so its changes have to reach the engine — otherwise a skin would sit without its
+    // background until the next settings edit. Disposed with the rest of the lifecycle.
+    const offWallpaper = typeof document === 'undefined' ? () => {} : observeWallpaperEngine(document, apply)
     apply()
 
     const offSlot = ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -97,6 +103,7 @@ export function apply(ctx: ClientContext): void {
 
     return () => {
       offSlot()
+      offWallpaper()
       offSnapshot()
       override?.dispose()
       override = undefined

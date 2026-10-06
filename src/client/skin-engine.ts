@@ -12,10 +12,11 @@
  */
 
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
-import type { CssRule, EmbeddedImage, InjectedLayer, SkinSettings, TextOverride, TokenModes } from '../skin-schema.ts'
+import type { CssRule, EmbeddedImage, InjectedLayer, SkinSettings, TextOverride, TokenModes, TokenOverrides } from '../skin-schema.ts'
 import { imageModeOf } from '../skin-schema.ts'
 import { anchorOf, componentById } from './anchors.ts'
 import { readDesktopShell } from './desktop.ts'
+import { publishSkinMarker, wallpaperEngineInstalled, wallpaperEngineOnStage } from './interop.ts'
 
 export const PLUGIN_ID = 'dsh-myskin'
 const STYLE_ID = 'dsh-myskin-rule'
@@ -233,6 +234,144 @@ export function readBackgroundAnchor(skin: SkinSettings): BackgroundAnchor {
  */
 export function withBackgroundAnchor(css: readonly CssRule[], anchor: BackgroundAnchor): CssRule[] {
   return withRootMarker(css, BG_ANCHOR_PROPERTY, anchor === 'conversation' ? 'conversation' : undefined)
+}
+
+/** Custom property that mirrors 兼容模式 into `css` (no schema field: see {@link BG_ANCHOR_PROPERTY}). */
+export const COMPAT_PROPERTY = '--dsh-myskin-compat'
+
+/** What the document records about 兼容模式: an explicit on/off, or "decide for me". */
+export type CompatChoice = 'on' | 'off' | 'auto'
+
+/**
+ * Custom property marking a css rule that paints a panel SURFACE (written by the region card).
+ *
+ * Only 兼容模式 reads it: the fill is the one declaration that would cover a background somebody
+ * else owns, and this marker is how the engine recognises its own surface rules without knowing
+ * which selectors the region card uses today (see {@link paintableRules}).
+ */
+export const PANEL_FILL_PROPERTY = '--dsh-myskin-panel'
+
+/**
+ * 兼容模式: keep the look, never take the background over.
+ *
+ * Another plugin may own the page background (a wallpaper engine, a glass/backdrop plugin, a
+ * desktop shell effect). This mode makes dsh-myskin a guest on that page: it stops painting its
+ * own wallpaper and the surface translucency that goes with it, stops writing the background
+ * family of tokens (the opaque surfaces that would cover the other plugin's artwork), and stops
+ * asking the wallpaper plugin to step aside. Colours that live IN FRONT of the background —
+ * labels, borders, brand, buttons, rules, text, layers — keep applying, so a skin can still
+ * supply typography and accents on top of somebody else's background.
+ *
+ * Stored as a marker declaration in `css` for the same reason the wallpaper anchor is: `css` has
+ * been schema-declared since the first release, while a new top-level field would need a DSH
+ * restart before it survives a save (an older Host drops what it does not know).
+ * @param skin - the skin document.
+ * @returns true when the document asks for 兼容模式.
+ */
+export function readCompatMode(skin: SkinSettings): boolean {
+  return resolveCompatMode(readCompatChoice(skin), false)
+}
+
+/**
+ * What the DOCUMENT says about 兼容模式, before the wallpaper plugin is taken into account.
+ *
+ * Three states, because "the user never touched the switch" is not the same as "the user turned it
+ * off": `on` and `off` are explicit decisions that must survive the plugin coming and going, while
+ * `auto` means "decide for me" — which is what a document that has never been near the switch says,
+ * and what a reset goes back to.
+ * @param skin - the skin document.
+ * @returns the recorded decision.
+ */
+export function readCompatChoice(skin: SkinSettings): CompatChoice {
+  for (const rule of skin.css ?? []) {
+    const match = rule.rule.match(/--dsh-myskin-compat:\s*([a-z0-9]+)/)
+    if (match === null) continue
+    const value = match[1]
+    if (value === '0' || value === 'off' || value === 'false') return 'off'
+    if (value === '1' || value === 'on' || value === 'true') return 'on'
+  }
+  return 'auto'
+}
+
+/**
+ * 兼容模式 as it is actually in effect.
+ *
+ * `auto` follows the wallpaper plugin: installed ⇒ 兼容模式 on, so a user who installs it does not
+ * have to discover the switch, and a user who uninstalls it gets the background back without having
+ * to remember anything. An explicit choice always wins — that is the whole point of recording it.
+ * @param choice - what the document says.
+ * @param wallpaperEngineInstalled - whether the wallpaper plugin is loaded right now.
+ * @returns whether the skin must stay out of the background.
+ */
+export function resolveCompatMode(choice: CompatChoice, wallpaperEngineInstalled: boolean): boolean {
+  if (choice === 'on') return true
+  if (choice === 'off') return false
+  return wallpaperEngineInstalled
+}
+
+/**
+ * Mirror 兼容模式 into the marker rule (`false` = the absence of the marker).
+ * @param css - the document's CSS rules.
+ * @param on - whether the mode is on.
+ * @returns a new rule list.
+ */
+export function withCompatMode(css: readonly CssRule[], on: boolean): CssRule[] {
+  // Off is written as an explicit `0`, never as an absent marker: with the wallpaper plugin present
+  // an absent marker means `auto` — which would flip the mode straight back on under the user.
+  return withRootMarker(css, COMPAT_PROPERTY, on ? '1' : '0')
+}
+
+/**
+ * Whether one `--dsw-*` token paints a page/panel SURFACE — the family 兼容模式 leaves alone.
+ *
+ * The dividing line is "would this opaque colour cover somebody else's background?": the page,
+ * card, panel, overlay and sidebar fills do; control-level fills (buttons, bubbles, inputs,
+ * scrollbars, nav-item states) sit on top of the page and stay, as do all foreground colours.
+ * @param name - the token name, e.g. `--dsw-alias-bg-base`.
+ * @returns true when the token belongs to the background family.
+ */
+export function isBackgroundToken(name: string): boolean {
+  return name.startsWith('--dsw-alias-bg-') || name === '--dsw-specific-sidebar-fill'
+}
+
+/**
+ * The tokens a skin still paints with (in 兼容模式: everything but the background family).
+ * @param tokens - the document's token overrides.
+ * @param compat - whether 兼容模式 is on.
+ * @returns the tokens to write (the same object when nothing is dropped).
+ */
+export function paintableTokens(tokens: TokenOverrides, compat: boolean): TokenOverrides {
+  if (!compat) return tokens
+  const kept: TokenOverrides = {}
+  // Keyed loop (not Object.entries): the values then keep their declared type without a cast.
+  for (const name of Object.keys(tokens ?? {})) {
+    if (!isBackgroundToken(name)) kept[name] = tokens[name]
+  }
+  return kept
+}
+
+/**
+ * The rules a skin still paints with (in 兼容模式: not the panel fills).
+ *
+ * A region rule marked with {@link PANEL_FILL_PROPERTY} paints a panel background — the surface that
+ * would sit on top of somebody else's wallpaper. In 兼容模式 that ONE declaration is dropped (the
+ * marker with it) while everything else the rule carries — radius, blur, border, padding — stays.
+ * The document is untouched: turning the mode off paints the fill again.
+ * @param css - the document's CSS rules.
+ * @param compat - whether 兼容模式 is on.
+ * @returns the rules to emit (the same array when nothing is dropped).
+ */
+export function paintableRules(css: readonly CssRule[], compat: boolean): readonly CssRule[] {
+  if (!compat) return css
+  const out: CssRule[] = []
+  for (const entry of css ?? []) {
+    if (declarationValue(entry.rule, PANEL_FILL_PROPERTY) === undefined) { out.push(entry); continue }
+    let rule = withoutDeclaration(entry.rule, 'background-color')
+    rule = withoutDeclaration(rule, 'background')
+    rule = withoutDeclaration(rule, PANEL_FILL_PROPERTY)
+    if (rule !== '') out.push({ selector: entry.selector, rule })
+  }
+  return out
 }
 
 /**
@@ -2184,10 +2323,33 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
   let bodyStyleProto: string | null = null
   if (typeof document !== 'undefined') bodyStyleProto = document.body.getAttribute('style')
 
+  // 兼容模式 (see {@link readCompatMode}): the page background belongs to somebody else, so this
+  // run paints in front of it only — no token that would cover it, no wallpaper layer, and no
+  // request for the wallpaper plugin to step aside (that request is exactly what would clear
+  // THEIR wallpaper out from under the user).
+  const compat = resolveCompatMode(
+    readCompatChoice(skin),
+    typeof document !== 'undefined' && wallpaperEngineInstalled(document),
+  )
+
+  // Interop, outbound (see ./interop.ts): ONE attribute on <html> is the whole contract with the
+  // wallpaper plugin — it watches this marker and steps its wallpaper and glass family aside for
+  // as long as it is up, then puts the user's wallpaper back. Published before the first pixel is
+  // painted and withdrawn by a cleanup, so it can never outlive the skin it announces. Skipped in
+  // 兼容模式: we are the guest there, and asking them to yield would delete the very background
+  // the mode exists to keep.
+  if (typeof document !== 'undefined' && !compat) {
+    publishSkinMarker(document, true)
+    cleanups.push(() => { publishSkinMarker(document, false) })
+  }
+
   // 1. Token layer: the official theme registry AND a direct var bind, so the
-  // change is immediate + scheme-correct regardless of the presenter.
-  if (Object.keys(skin.tokens).length > 0) {
-    const disposeTokens = theme.overrideTokens(PLUGIN_ID, skin.tokens)
+  // change is immediate + scheme-correct regardless of the presenter. In 兼容模式 the
+  // background family is filtered out here (and only here — the document keeps every value, so
+  // turning the mode off restores the full palette).
+  const tokens = paintableTokens(skin.tokens, compat)
+  if (Object.keys(tokens).length > 0) {
+    const disposeTokens = theme.overrideTokens(PLUGIN_ID, tokens)
     cleanups.push(() => { disposeTokens() })
     if (typeof document !== 'undefined') {
       const dark = document.body.hasAttribute('data-ds-dark-theme')
@@ -2196,7 +2358,7 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
         document.body.style.setProperty(name, dark ? modes.dark : modes.light)
         cleanups.push(() => { document.body.style.removeProperty(name) })
       })
-      for (const [name, modes] of Object.entries(skin.tokens)) sv(name, modes)
+      for (const [name, modes] of Object.entries(tokens)) sv(name, modes)
     }
   }
 
@@ -2373,7 +2535,15 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
   // desktop shell) on the frame; the base surfaces then become semi-transparent.
   // Everything stays INSIDE the skin-owned <style>, removed on dispose, so <body>'s
   // inline style is never touched and the skin stays byte-reversible.
-  if (skin.canvas.background !== undefined && skin.canvas.background !== '' && typeof document !== 'undefined') {
+  // Interop, inbound (see ./interop.ts): the wallpaper plugin's own layer is on stage, so ITS
+  // wallpaper wins the canvas — this skin drops the second wallpaper and the surface translucency
+  // that exists only to let our image show through, and keeps painting everything else. Nobody is
+  // asked to guess: their client yields the other way round while we publish html[data-dsh-skin],
+  // so this branch is the manual-pick / older-build case, not the steady state.
+  // 兼容模式 takes the background out of the skin's hands entirely; otherwise the wallpaper
+  // plugin's own layer wins the canvas while it is up.
+  const wallpaperTaken = compat || (typeof document !== 'undefined' && wallpaperEngineOnStage(document))
+  if (!wallpaperTaken && skin.canvas.background !== undefined && skin.canvas.background !== '' && typeof document !== 'undefined') {
     const opacity = readBackgroundOpacity(skin)
     // The anchor has to be passed HERE, not only in the editor's preview: in 交互模式 (and after a
     // reload) the committed document is the only thing that paints the page, which is exactly where
@@ -2381,7 +2551,9 @@ export function applySkin(theme: ThemeRuntime, skin: SkinSettings): SkinOverride
     rules.push(...wallpaperRules(document, skin.canvas.background, surfaceTint(document, opacity, desktopFrameTint(document)), readBackgroundAnchor(skin)))
     rules.push(...backgroundSurfaceRules(document, opacity, desktopFrameTint(document)))
   }
-  for (const { selector, rule } of skin.css) {
+  // 兼容模式 drops the panel fills here (see {@link paintableRules}); everything else in `css` —
+  // hand-written rules included — is painted as written.
+  for (const { selector, rule } of paintableRules(skin.css, compat)) {
     if (selector !== '' && rule !== '') rules.push(`${selector} { ${rule} }`)
   }
   if (rules.length > 0 && typeof document !== 'undefined') {

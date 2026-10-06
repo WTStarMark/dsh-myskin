@@ -13,7 +13,7 @@
  */
 
 import type { CssRule, SkinSettings } from '../skin-schema.ts'
-import { declarationValue, mergeDeclaration, withoutDeclaration } from './skin-engine.ts'
+import { PANEL_FILL_PROPERTY, declarationValue, mergeDeclaration, withoutDeclaration } from './skin-engine.ts'
 
 /** One surface the card can shape. */
 export interface Region {
@@ -42,6 +42,27 @@ export const REGIONS: readonly Region[] = [
   {
     id: 'sidebar', labelKey: 'regionSidebar', hintKey: 'regionSidebarHint',
     selectors: ['[class*="_sidebarCol"]', '[class~="sidebarCol"]'],
+  },
+  {
+    /*
+     * DSH's own right sidebar (document preview / files / browser / terminal / plugin panes).
+     *
+     * Three anchors, because the column is not one element:
+     *   · `[data-sidebar-right-panel][data-sidebar-right-open]` — the panel itself: the card the
+     *     user sees, and still the card in the "开始" guide state where NO pane is mounted yet.
+     *     The `[data-sidebar-right-open]` half is not decoration: that container STAYS MOUNTED with
+     *     its full width while the panel is closed (only its children are hidden), so painting the
+     *     bare attribute would leave a plate behind a closed sidebar. The wallpaper plugin documents
+     *     the same trap in its own stylesheet and guards it the same way.
+     *   · `[data-dockkit-pane]` / `[data-dockkit-float]` — a docked pane (which paints its own
+     *     opaque `--dsw-alias-bg-base`) and a pane dragged out of the dock. They need the SAME
+     *     radius as the panel, or a square child paints over the panel's rounded corner.
+     *
+     * All three are published `data-*` hooks (no CSS-module hash to rot), and `data-dockkit-*`
+     * belongs to that one package — checked against the install.
+     */
+    id: 'rightSidebar', labelKey: 'regionRightSidebar', hintKey: 'regionRightSidebarHint',
+    selectors: ['[data-sidebar-right-panel][data-sidebar-right-open]', '[data-dockkit-pane]', '[data-dockkit-float]'],
   },
   {
     // The composer publishes `data-composer-*` hooks (card = the whole input surface, seat = where it
@@ -80,6 +101,15 @@ export interface RegionField {
   readonly onValue?: string
   /** Value written when a toggle is off. */
   readonly offValue?: string
+  /**
+   * Shorthand this field refines, e.g. `border-radius` for one corner.
+   *
+   * CSS resolves the shorthand over ALL the longhands it covers, so a corner written after it would
+   * win — and a corner written BEFORE it would be erased. The writer therefore hoists the shorthand to
+   * the front of the block whenever such a field is written (see {@link writeRegionStyle}), which is
+   * also what lets the card keep showing the unified value next to the per-corner ones.
+   */
+  readonly refines?: string
   /**
    * Wrapper the value goes into, e.g. `blur({value})` for `backdrop-filter`.
    *
@@ -120,6 +150,11 @@ export const REGION_RADII: readonly { readonly value: string; readonly labelKey:
 export const REGION_FIELDS: readonly RegionField[] = [
   { id: 'bg', labelKey: 'regionBg', property: 'background-color', kind: 'color' },
   { id: 'radius', labelKey: 'regionRadius', property: 'border-radius', kind: 'option', options: REGION_RADII },
+  // 四角单独定义。留空＝跟随上面那个统一值；一旦单独填了，统一值仍然保留并继续管其余三角。
+  { id: 'radiusTL', labelKey: 'regionRadiusTL', property: 'border-top-left-radius', kind: 'px', unit: 'px', step: 1, min: 0, max: 200, refines: 'border-radius' },
+  { id: 'radiusTR', labelKey: 'regionRadiusTR', property: 'border-top-right-radius', kind: 'px', unit: 'px', step: 1, min: 0, max: 200, refines: 'border-radius' },
+  { id: 'radiusBR', labelKey: 'regionRadiusBR', property: 'border-bottom-right-radius', kind: 'px', unit: 'px', step: 1, min: 0, max: 200, refines: 'border-radius' },
+  { id: 'radiusBL', labelKey: 'regionRadiusBL', property: 'border-bottom-left-radius', kind: 'px', unit: 'px', step: 1, min: 0, max: 200, refines: 'border-radius' },
   { id: 'shadow', labelKey: 'regionShadow', property: 'box-shadow', kind: 'option', options: REGION_SHADOWS },
   { id: 'blur', labelKey: 'regionBlur', property: 'backdrop-filter', kind: 'px', unit: 'px', step: 1, min: 0, max: 40, template: 'blur({value})' },
   { id: 'borderColor', labelKey: 'regionBorderColor', property: 'border-color', kind: 'color' },
@@ -204,12 +239,44 @@ export function readRegionStyle(css: readonly CssRule[], region: Region): Map<st
 export function writeRegionStyle(css: readonly CssRule[], region: Region, field: RegionField, value: string | undefined): CssRule[] {
   const selector = regionSelector(region)
   const rules = css ?? []
-  const existing = rules.find((rule) => rule.selector === selector)?.rule
-  const rule = value === undefined || value === ''
+  const current = rules.find((rule) => rule.selector === selector)?.rule
+  // A field that refines a shorthand is always written AFTER it, never before: the shorthand sets all
+  // four corners, so block order decides who wins. Hoisting (not re-writing) keeps the unified value
+  // readable for the card while the corner overrides it.
+  const existing = field.refines === undefined ? current : hoistShorthand(current, field.refines)
+  const written = value === undefined || value === ''
     ? withoutDeclaration(existing, field.property)
     : mergeDeclaration(existing, field.property + ': ' + formatRegionValue(field, value) + ' !important;')
+  // 兼容模式 has to know which rules paint a panel SURFACE: a fill is exactly what would cover a
+  // background somebody else owns. Marked here (only while the rule carries one), stripped at paint
+  // time by `paintableRules` — so the document keeps the value and the mode stays reversible.
+  // Exactly one marker, and only while the rule paints a fill (rewriting a field must not leave a
+  // stale marker behind, and clearing the fill must take it away).
+  const withoutMarker = withoutDeclaration(written, PANEL_FILL_PROPERTY)
+  const rule = declarationValue(written, 'background-color') === undefined
+    ? withoutMarker
+    : mergeDeclaration(withoutMarker, PANEL_FILL_PROPERTY + ': 1;')
   const rest = rules.filter((entry) => entry.selector !== selector).map((entry) => ({ selector: entry.selector, rule: entry.rule }))
   return rule === '' ? rest : [...rest, { selector, rule }]
+}
+
+/**
+ * Move a shorthand declaration to the FRONT of a declaration block.
+ *
+ * Only needed for the fields that refine one ({@link RegionField.refines}). The value, its
+ * `!important` and the rest of the block are untouched — this is a reorder, not a rewrite, so a
+ * hand-written rule keeps every declaration it had.
+ * @param rule - the declaration block ('' when the rule does not exist yet).
+ * @param shorthand - the property to hoist.
+ * @returns the block with the shorthand first.
+ */
+export function hoistShorthand(rule: string | undefined, shorthand: string): string {
+  const text = rule ?? ''
+  const value = declarationValue(text, shorthand)
+  if (value === undefined) return text
+  const important = new RegExp(shorthand.replace(/[-[\]{}()*+?.\\^$|]/g, '\\$&') + '\\s*:[^;]*!important', 'i').test(text)
+  const rest = withoutDeclaration(text, shorthand)
+  return shorthand + ': ' + value + (important ? ' !important' : '') + (rest === '' ? '' : '; ' + rest)
 }
 
 /**

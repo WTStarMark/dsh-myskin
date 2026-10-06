@@ -1,10 +1,10 @@
 ---
 name: dsh-myskin
-whenToUse: "用户输入 /dsh-myskin（设计自己的主题的入口）或要求给 DSH 换外观、做皮肤、改配色/字体/文字/嵌入图；安装或卸载 dsh-myskin 插件；编写、导入导出、调试 .dshskin 皮肤包；排查皮肤不生效、嵌入图与锚点、回收站、组块编辑与整组间隔、**跨界面改同一个组件（全站作用域）或按界面显示/隐藏（界面显示：对话 vs 设置/插件页）**、绘制模式面板遮挡（其他插件界面被压住、换边停靠）、以及「保存失败：canvas」；或读写 dsh-myskin 的设置条目。"
-description: DSH 通用皮肤框架 + GUI 可视化皮肤编辑器 dsh-myskin 0.4.0 的完整说明与操作指向：装载（profile bundle）、皮肤文档字段（tokens/css/text/canvas/layers/content/library）、绘制模式（画布编辑器：选择、样式分组、文字、字体、本机字体列表、位置与缩放、回收站、面板停靠与遮挡诊断、动效与性能约束）、皮肤包 .dshskin 的读写格式、皮肤库与导入导出、可逆性红线。Use when the user asks to change the DSH look, apply or manage a dsh-myskin skin, install this plugin into a DSH profile, author or debug a skin document, or read/write the `dsh-myskin` settings entry.
+whenToUse: "用户输入 /dsh-myskin（设计自己的主题的入口）或要求给 DSH 换外观、做皮肤、改配色/字体/文字/嵌入图；安装或卸载 dsh-myskin 插件；编写、导入导出、调试 .dshframework 皮肤包；排查皮肤不生效、嵌入图与锚点、回收站、组块编辑与整组间隔、**跨界面改同一个组件（全站作用域）或按界面显示/隐藏（界面显示：对话 vs 设置/插件页）**、绘制模式面板遮挡（其他插件界面被压住、换边停靠）、以及「保存失败：canvas」；或读写 dsh-myskin 的设置条目。"
+description: DSH 全兼容皮肤可视化编辑框架 dsh-myskin 0.4.1 的完整说明与操作指向：装载（profile bundle）、皮肤文档字段（tokens/css/text/canvas/layers/content/library）、绘制模式（画布编辑器：选择、样式分组、文字、字体、本机字体列表、位置与缩放、回收站、面板停靠与遮挡诊断、动效与性能约束）、皮肤包 .dshframework 的读写格式、皮肤库与导入导出、可逆性红线。Use when the user asks to change the DSH look, apply or manage a dsh-myskin skin, install this plugin into a DSH profile, author or debug a skin document, or read/write the `dsh-myskin` settings entry.
 ---
 
-# dsh-myskin 技能（包版本 0.4.0）
+# dsh-myskin 技能（包版本 0.4.1）
 
 > 本技能**只陈述功能、契约与指向**，不做美化/配色指导。
 > 适配 **DSH 0.1.7-rc.2 与 0.2.0-rc.1**（Web 与 Desktop 共用同一条客户端插件管线）。
@@ -21,7 +21,7 @@ description: DSH 通用皮肤框架 + GUI 可视化皮肤编辑器 dsh-myskin 0.
 | 明暗偏好：跟随系统 / 固定深 / 固定浅 | 决定令牌是**明暗成对**写还是只写一套 | `tokens[*].light/dark` |
 | 主色或氛围（给色值或形容词） | 品牌色牵动按钮、选中态、链接 | `--dsw-alias-brand-primary` 等 |
 | 字体偏好：界面 / 正文 / 代码 | 三档作用域互不干扰，代码字体最常被忽略 | `font-roles` |
-| 要不要背景图 / 嵌入图 | 决定是否走绘制模式与 `.dshskin` 里的素材 | `canvas` / `layers` |
+| 要不要背景图 / 嵌入图 | 决定是否走绘制模式与 `.dshframework` 里的素材 | `canvas` / `layers` |
 
 用户没给方向时**先问，不要直接动手**；用户已经说清的方向不要重复问。
 
@@ -44,9 +44,9 @@ description: DSH 通用皮肤框架 + GUI 可视化皮肤编辑器 dsh-myskin 0.
 
 ### 0.4 落地：两条路，都不需要改 DSH 配置
 
-- **路径 A（推荐，可交付文件）**：把皮肤文档打成 `.dshskin` 放到用户工作区，让他在「皮肤管理 → 导入皮肤」里选它。
-  纯 Node 可用、零 DOM：`src/client/dshskin.ts` 的 `packSkin(skin, { name, generator })` → 写盘即可；
-  参考 `tests/dshskin.test.mjs` 里的最小文档形状（`tokens` / `css` / `text` / `canvas` / `layers`）。
+- **路径 A（推荐，可交付文件）**：把皮肤文档打成 `.dshframework` 放到用户工作区，让他在「皮肤管理 → 导入皮肤」里选它。
+  纯 Node 可用、零 DOM：`src/client/dshframework.ts` 的 `packSkin(skin, { name, generator })` → 写盘即可；
+  参考 `tests/dshframework.test.mjs` 里的最小文档形状（`tokens` / `css` / `text` / `canvas` / `layers`）。
 - **路径 B（手把手）**：给一张**可粘贴清单**——令牌表（`--dsw-*` → light / dark 两列）、css 规则、字体栈；
   用户在「皮肤管理」里逐项填（css 走极客模式粘贴，字体走「界面 / 正文 / 代码」三行）。
 
@@ -60,7 +60,7 @@ description: DSH 通用皮肤框架 + GUI 可视化皮肤编辑器 dsh-myskin 0.
 
 ### 0.6 收尾必报四件事
 
-1. 用了哪些令牌与 css 规则（可核对）；2. 对比度怎么算过的；3. 怎么**一键还原**（「还原默认」/ 关「启用皮肤」）；4. 怎么导出 `.dshskin` 备份。
+1. 用了哪些令牌与 css 规则（可核对）；2. 对比度怎么算过的；3. 怎么**一键还原**（「还原默认」/ 关「启用皮肤」）；4. 怎么导出 `.dshframework` 备份。
 
 ### 0.7 三个起步配方
 
@@ -71,14 +71,14 @@ description: DSH 通用皮肤框架 + GUI 可视化皮肤编辑器 dsh-myskin 0.
 > 改完必须**自己按 §0.5 算一遍对比度**再交付——预设之所以能"闭眼选"，就是因为这些底线被测试钉着。
 ## 1. 项目是什么 / 怎么装载
 
-DSH **通用皮肤框架**：可视化自定义 + 实时预览 + 「皮肤管理」设置页。非侵入、完全可逆——不改 DSH 源码/配置，不改 DSH 进程。
+DSH **全兼容皮肤可视化编辑框架**：在真实界面上点选即可改外观、配色、字体与排版，导出 `.dshframework` 皮肤包分发。非侵入、完全可逆——不改 DSH 源码/配置，不改 DSH 进程。
 
 - 形态：**profile bundle**。包内 `cordis.patch.yml` 声明条目 `id: dsh-myskin`，由该 profile 的 `dsh.profile.bundles` 选中。
 - 目标 profile：Web = `$DSH_HOME/profiles/web`，Desktop = `$DSH_HOME/profiles/desktop`；**两者各装一次，皮肤文档互不共享**。
 - **本技能自身的注册**：技能是**目录包** `$DSH_HOME/skills/<name>/SKILL.md`（frontmatter 写 `name` / `description` / `whenToUse`），
   由 DSH 的 `skill-filesystem` 提供者扫描 + 热监听；包内 `skills/dsh-myskin/` 用一条软链即可注册：
   `ln -sfn <包目录>/skills/dsh-myskin "$DSH_HOME/skills/dsh-myskin"`（**不需要重启**，下一次技能目录刷新即生效；删链即注销）。
-- **首选装法（界面）**：DSH 的 **设置 → 插件 → 添加插件**，填 **GitHub 仓库地址**（`https://github.com/WTStarMark/dsh-myskin`，可带 `#v0.4.0`）、npm 包名或**本地目录路径**；安装由 **pnpm** 执行，成功后插件管理器会**自动**把包名写进该 profile 的 `dsh.profile.bundles`。界面明确提示：插件**不支持自动更新**，升级要**先卸载再安装**。
+- **首选装法（界面）**：DSH 的 **设置 → 插件 → 添加插件**，填 **GitHub 仓库地址**（`https://github.com/WTStarMark/dsh-myskin`，可带 `#v0.4.1`）、npm 包名或**本地目录路径**；安装由 **pnpm** 执行，成功后插件管理器会**自动**把包名写进该 profile 的 `dsh.profile.bundles`。界面明确提示：插件**不支持自动更新**，升级要**先卸载再安装**。
 - **离线装法**：把包放进 `<profile>/node_modules/dsh-myskin`（拷贝或软链，**目录名必须是包名**），再把 `"dsh-myskin"` 追加进 `dsh.profile.bundles`；`patchReload: live` 时保存即热加载（否则重启 DSH，重启交给用户）。
 - `lib/index.js` **自带 schemastery**（0.3.1 起不再 external），所以「解压/拷贝/软链」三种装法都不需要 node_modules。宿主半区自检：`node --input-type=module -e "const m = await import('<pkg>/lib/index.js'); console.log(Object.keys(m))"` → `[ 'Config', 'apply', 'name' ]`。
 - **写 profile 文件属工作区外写入**：动手前先说明影响并取得用户确认。
@@ -147,7 +147,7 @@ DSH **通用皮肤框架**：可视化自定义 + 实时预览 + 「皮肤管理
 
 - 「字体」写 `font-family`（受管属性，可直填任意家族栈；建议列表只是建议）。
 - 「嵌入字体文件」：`.woff2/.woff/.ttf/.otf`，**上限 30 MB**；按扩展名判定 `format()`（`fontFormat()`）；以 **`css` 里 `selector='@font-face'` 的条目**存入（`fontFaceRule()`；引擎按 `selector { rule }` 渲染，**不要**再套包裹层）。删除该条目即卸载字体。
-- **>2 MB 必须给出提示**：字体在文档里是 base64，文档每次编辑整份重发——保存会变慢；导出的 `.dshskin` 里它是原样文件。
+- **>2 MB 必须给出提示**：字体在文档里是 base64，文档每次编辑整份重发——保存会变慢；导出的 `.dshframework` 里它是原样文件。
 - **整站字体三作用域**（`src/client/font-roles.ts`，UI 在「文字」分组）：`ui`=`:root { --dsw-font-family }`、
   `code`=`:root { --ds-font-family-code; --dsw-font-markdown-code-font-family }`、`text`=`TEXT_FONT_SELECTOR { font-family }`
   （对话内容槽 + `[class*="_markdown_"]` + 输入框）。要点：
@@ -157,7 +157,7 @@ DSH **通用皮肤框架**：可视化自定义 + 实时预览 + 「皮肤管理
   3. **正文不要写 `!important`**：正文是作者级普通规则（皮肤样式表在最后，靠顺序取胜即可），加了 `!important` 会把段落里的行内 code 一起拽出代码脸。
   4. **别用 `body { font-family: … !important }` 代替界面角色**（0.3.8 的「应用到整页」就是这么干的）：它连代码块一起抢走。界面走 `--dsw-font-family`。
   5. 「本机字体」列表是**一个控件四个目标**（当前元素 + 三作用域）；写入作用域时用 `roleStackFor()` 附带同类兜底（`monospace` / `system-ui, sans-serif`），
-     因为作用域会随 `.dshskin` 换机器。
+     因为作用域会随 `.dshframework` 换机器。
   6. 这两个变量是**兼容契约**：`check:compat` 的「font roles resolve」会校验该代 DSH 仍在读它们（失效时字体"看起来应用了却没效果"，且没有任何报错）。
 - **本机字体列表**：「本机字体」按钮 → `scanFonts(document, window)`（`src/client/fonts.ts`）。主路径是 Chromium 的
   Local Font Access API（`queryLocalFonts`，**需要一次用户手势 + 授权**，所以只在点击里调用，绝不在挂载时自动跑）；
@@ -401,6 +401,30 @@ DSH **通用皮肤框架**：可视化自定义 + 实时预览 + 「皮肤管理
 配套：Inspector 的字段/变换/隐藏/移除/清除都走 `activeSelector`；**文字替换始终单元素**（每行名字不同）；
 画布拖动在整组时也作用于整块（与在 X 字段改数字等价）；切换选择时 `scope` 保持，但组不可用时自动回落到单元素。
 
+### 4.13.1 区域（`src/client/regions.ts`）
+
+六个具名表面：对话区 / 左侧栏 / **右侧侧边栏** / 输入区 / 设置弹窗 / 消息区。
+
+右侧栏（DSH 原生 `@deepseek-ai/dsh-client-ui-sidebar-right`）**不是一个元素**，所以锚点有三个：
+
+- `[data-sidebar-right-panel][data-sidebar-right-open]` —— 用户看到的那张卡；「开始」引导态**没有任何 pane**，
+  只有这一个锚点能命中（踩过：只锚 pane ⇒ 引导态命中 0 ⇒「圆角改不动」）。
+  ⚠️ `[data-sidebar-right-open]` 那半截不是装饰：面板容器**关闭时仍挂在布局里**（只把子元素 `visibility:hidden`），
+  裸锚会让关闭状态留一块板子。壁纸引擎自己的样式表里写着同一个坑并做了同样的护栏。
+- `[data-dockkit-pane]` / `[data-dockkit-float]` —— 已停靠的 pane（自己画 `--dsw-alias-bg-base`）与被拖出成浮层的 pane；
+  它们必须与面板拿到**同一个圆角**，否则方角子元素会盖住面板的圆角。
+
+三个都是发布过的 `data-*` 钩子（`data-dockkit-*` 只在该包出现，对着安装核对过），不写 CSS-module 哈希。
+变体的质感与底色都覆盖这个区域。
+**圆角四角可分开**：统一值走 `border-radius`（字段 `radius`），四角走 `border-top-left-radius` 等长属性
+（字段 `radiusTL/TR/BR/BL`，都带 `refines: 'border-radius'`）。
+⚠️ **顺序即语义**：简写会一次性设置四个角，所以角必须写在简写**之后**。`writeRegionStyle` 对带 `refines` 的字段
+先把简写**提到块首**（`hoistShorthand`，只重排不改写），再追加该角——这样统一值与单角值同时存在、都能读回。
+新增"某一角"这类字段时照抄这个模式，不要自己往块尾怼声明。
+
+写区域样式一律走 `writeRegionStyle()`：它会在规则带底色时打上 `--dsh-myskin-panel` 标记，
+兼容模式据此在绘制期摘掉底色（见 §4.20）。
+
 ### 4.14 全站作用域（`src/client/site-scope.ts`）
 
 「编辑范围」的第三档：**只用元素自身的标识写选择器，不带任何祖先路径**。存在的唯一理由：
@@ -488,13 +512,23 @@ DSH **通用皮肤框架**：可视化自定义 + 实时预览 + 「皮肤管理
 
 ### 4.18 变体（`src/client/variants.ts`）
 
-四个维度（卡片材质 / 圆角 / 密度 / 强调色）× 若干选项 + 四个整套，**全部点选、零 CSS**。变体页签放在面板第一位。
+**五个维度**：质感 frame（模糊 / 边框 / 阴影）、底色 fill（`background-color`）、圆角、密度、强调色；
+外加四个整套与**作用对象**（全部区域，或单独一处）。全部点选、零 CSS，页签放在面板第一位。
 
-- **选择必须幂等**：选项把它拥有的属性**整套写下**（含 `none` / `0`），否则「玻璃→无框」会留下上一次的边框与阴影。
-  加新选项时先想清楚「它拥有哪些属性」，然后一个不漏地写全。
+- **四角是四个子轴**（`radiusTL/TR/BR/BL`，带 `subOf: 'radius'`，面板里折进「四角单独调」）：每个只写自己的长属性，
+  统一值继续管没点过的角。标记 / 作用对象 / 撤销 / 恢复默认对它们与普通轴完全一致，**不需要任何特殊分支**——加"某一角"这类维度时照抄即可。
+- **质感与底色必须是两个轴**：绑在一起时"有玻璃边缘但不盖背景"无法表达，而这正是与壁纸插件共存的正解。
+  加维度时先想清楚「它拥有哪些属性」，然后一个不漏地写全。
+- **作用对象只约束区域写入**：`applyVariantOption(skin, axis, option, scope)`。排版令牌与品牌令牌没有分区形态，
+  始终全局——卡片里必须写明，否则"只改输入框"会连着字体一起改。
+- **选择必须幂等**：选项把它拥有的属性**整套写下**（含 `''`＝清除、`0px`、`transparent`），否则「玻璃→无」会留下上一次的边框与阴影。
+- ⚠️ **模糊值写裸数字**：区域字段自带 `template: 'blur({value})'`，写 `blur(18px)` 会变成 `blur(blur(18px))`（无效 CSS＝没有模糊，0.4.1 修过一次）；
+  关闭模糊写 `''`（清掉声明），**不是** `none`（那会写成 `blur(none)`）。
 - 它**只调用既有机制**：`writeRegionStyle`（区域）+ `writeMarkdownToken`（排版）+ 品牌令牌——**不要再写第二份实现**。
-- 当前选择存在 `:root` 的**一个标记** `--dsh-myskin-variant: material=glass,radius=l,…`：**分隔符只能用逗号**，
-  用 `;` 会在 CSS 里截断声明（踩过：只剩第一对生效）。读回用 `readVariantChoices`。
+- 当前选择存在 `:root` 的**一个标记** `--dsh-myskin-variant`：条目形如 `axis=option` 或 `axis=option@scope`，
+  **分隔符只能用逗号**（用 `;` 会在 CSS 里截断声明，踩过：只剩第一对生效）。
+  读回用 `readVariantChoices` + `choicesFor(scope)`：**全局打底、本处覆盖**，与页面真实的层叠一致。
+- 旧文档的 `material=…` 由 `LEGACY_MATERIAL` 映射到 frame/fill，那张表不要删。
 - 「恢复默认」= `clearVariant`：清掉变体拥有的区域属性、排版令牌、品牌令牌；手写规则与其它令牌不许动。
 - 与「区域」「对话」页签写同一批属性，**后改的覆盖先改的**——卡片里必须写明这一点，否则用户会以为面板坏了。
 
@@ -527,7 +561,7 @@ DSH **通用皮肤框架**：可视化自定义 + 实时预览 + 「皮肤管理
 ## 6. 皮肤库与导入导出
 
 - 皮肤库：「保存为皮肤」把当前文档存成命名条目；支持重命名/上移下移/复制/加载/删除。
-- **导出**：`.dshskin`（第 5 节）。**导入**：接受 `.dshskin` 与旧 `.json`。
+- **导出**：`.dshframework`（第 5 节）。**导入**：接受 `.dshframework`、旧名 `.dshskin`（manifest 的 `format: dshskin` 与 `dshskin:assets/…` 引用都认）以及旧 `.json`。
 - **导入/加载 = 整体替换文档**：先「导出皮肤」备份；不想丢壁纸就带 `canvas.background`，不想丢皮肤库就带 `library`。
 
 ## 7. 运行时生命周期（`applySkin`）
@@ -543,12 +577,12 @@ DSH **通用皮肤框架**：可视化自定义 + 实时预览 + 「皮肤管理
 1. **只读现状**：读该 profile 的 `cordis.patch.yml` → `id: dsh-myskin` 的 `config`（注意 `!!js` 标签）。
 2. **设计**：产出完整 `SkinSettings`。
 3. **校验**：每个 `--dsw-*` 必须存在于当前 DSH 的 `@deepseek-ai/dsh-client-ui-theme`（未知令牌静默无效）；`tokens` 每项 `{light,dark}` 成对。仓库内可跑 `npm run check:compat` / `npm test`。
-4. **交付**：写成 `.dshskin`（或用 JSON），由用户「皮肤管理 → 导入皮肤」导入；也可存进 `library` 交给用户点「加载」。
+4. **交付**：写成 `.dshframework`（或用 JSON），由用户「皮肤管理 → 导入皮肤」导入；也可存进 `library` 交给用户点「加载」。
 5. **不要手写 profile patch**（红线，且单行 170 KB+ 的 YAML 极易写坏）。
 
 ## 9. 安全 / 可逆（红线）
 
-1. `enabled:false` 或清空文档 = 精确还原，无需重启。
+1. `enabled:false` 或清空文档 = 精确还原，无需重启。「还原默认」写入的是**保留皮肤库**的空文档（`resetSkin`）：只清外观，不删用户保存的命名皮肤。
 2. 不改 DSH 源码 / 全局配置；不 kill、不重启 DSH（重启交给用户）。
 3. 皮肤自有节点带 `data-dsh-myskin-layer` / `data-dsh-myskin-owner` / `data-dsh-myskin-ui` 标记，dispose 精确移除；不写 body 内联 style。
 4. 写 profile 文件、写工作区外文件前先申报并取得确认。
@@ -567,13 +601,59 @@ DSH **通用皮肤框架**：可视化自定义 + 实时预览 + 「皮肤管理
   面板顶部会写明来源。别把枚举放到挂载时自动跑（没有手势会被拒），也别把列表当成皮肤文档的一部分。
 - **`npm install` 陷阱**：`NODE_ENV=production` 会跳过/清掉 devDependencies（构建、测试、类型检查全失效），请用 `npm install --include=dev`。
 
-## 11. 源码指向（0.4.0）
+### 4.20 兼容模式（`--dsh-myskin-compat`，不接管背景）
+
+「皮肤管理」页的开关，**不是** `SkinSettings` 的顶层字段，而是文档 `css` 里 `:root` 规则上的一条标记
+（与背景强度 / 壁纸锚点 / 字体作用域共用同一条 `:root`；用 `readCompatMode` / `withCompatMode` 读写）。
+这样旧的宿主 schema 也能保存它，不需要重启 DSH。
+
+开启后（`readCompatMode(skin) === true`）：
+
+| 层 | 行为 |
+|---|---|
+| `canvas.background` 与表面透明规则 | **不写**（`applySkin` 里与"对方壁纸在台"同一条分支） |
+| 背景类令牌 `--dsw-alias-bg-*`、`--dsw-specific-sidebar-fill` | **不写**（`paintableTokens` 过滤；值仍留在文档里） |
+| 区域 / 面板底色 | **不写**（区域卡写下的 `background-color` 带 `--dsh-myskin-panel` 标记，`paintableRules` 只摘这条声明与该标记，同一规则里的圆角 / 模糊 / 边框 / 内边距照常；**手写规则不动**） |
+| `html[data-dsh-skin]` 互操作标记 | **不发布**（不要求壁纸插件让路——让路会清掉用户的壁纸） |
+| 前景令牌 / `css` / 文字 / 图层 / 嵌入图 | 照常 |
+
+绘制模式的实时预览遵守同一套规则（背景、背景类令牌、区域底色都不预览），令牌面板把被跳过的条目标为「兼容模式：不写」，
+**自动开启**：`readCompatChoice(skin)` 给出 `on` / `off` / `auto`；
+`auto`（文档里从没出现过标记）时，由 `wallpaperEngineInstalled(document)` 决定——
+它读对方常挂的 `data-we-glass-page` / `data-we-adapter` / `data-we-wallpaper`（见 `interop.ts` 的 `WALLPAPER_ENGINE_MARKERS`）。
+`resolveCompatMode(choice, installed)` 是**唯一**的判定入口：引擎、绘制模式预览、令牌面板、区域卡、变体卡都必须用它，
+否则界面会说自己没开的模式开了、或反过来。
+
+⚠️ 关闭开关写的是**明确的** `--dsh-myskin-compat: 0`，**绝不能写成"删除标记"**：删掉等于回到 `auto`，
+装了壁纸插件时下一次 apply 立刻把模式翻回开启，用户会觉得开关坏了。
+画面页顶部在开启时显示原因。判断"背景类"用 `isBackgroundToken()`：页面 / 面板 / 侧栏 / 浮层这类**会被别人背景盖到**的表面算，
+按钮、气泡、输入框、滚动条等组件级填充不算。
+
+## 10.1 已声明兼容适配 dsh-wallpaper-engine（`src/client/interop.ts`）
+
+上游仓库：<https://github.com/elysia395/dsh-wallpaper-engine>（对照版本 1.3.0-r2）。本项目**声明兼容适配**它：
+装了壁纸引擎就自动进入兼容模式、不发布让路标记、并读它的在台标记；两边各管各的（它管背景与毛玻璃，本项目管配色/字体/边框/圆角/规则/文字/图层）。
+改互操作代码时不要违背上面三条，也不要去写它的任何标记。
+
+
+两个插件画同一片像素时按 DOM 标记协作，双向都不 import 对方：
+
+- **我们发布**：皮肤在台上时 `html[data-dsh-skin="dsh-myskin"]`（停用 / 还原 / 卸载即摘掉）。
+  `dsh-plugin-wallpaper-engine` 1.3.0-r2 观察该标记后让路：清壁纸层 + 摘玻璃整族，
+  并记住用户选的壁纸以便放回（对方 450ms 进场 / 2.6s 复位两道滞回）。别的皮肤插件写的同名标记只读不写。
+- **我们读取**：`body[data-we-wallpaper]` 在场时不画自己的画布壁纸与表面透明层（其余令牌 / 规则 / 文字 / 图层照常），
+  并观察其变化，对方让出画布后壁纸自动回来。
+
+改 `applySkin` 时不要绕过这两条，也不要替对方写它的标记。
+
+## 11. 源码指向（0.4.1）
 
 - `cordis.patch.yml` — bundle 层，声明 `id: dsh-myskin`。
 - `src/index.ts` / `src/host-schema.ts` — Host 半区：`Config` + `name`；`Config` 顶层字段全部 `.volatile()`。
 - `src/skin-schema.ts` — 数据模型（`SkinSettings` / `parseSkin` / `cloneSkin`）。
 - `src/client/index.ts` — 浏览器半区：`configForms.whileServed` + 实时皮肤生命周期（`inject` 只列真正用到的服务：`slots/locale/configForms/theme`，它是**激活门禁**）。
-- `src/client/skin-engine.ts` — 可逆引擎 + 画布纯函数（`pickElementAt` / `textHostOf` / `selectorOf` / `withManagedDeclarations` / `sameDeclarations` / `stepValue` / `transformValue` / `parseTransform` / `transformEdit` / `transformPreview` / `fontFaceRule` / `fontFormat` / `elementLabel` /
+- `src/client/interop.ts` — 与壁纸插件的 DOM 标记契约（`publishSkinMarker` / `wallpaperEngineOnStage` / `observeWallpaperEngine`）。
+- `src/client/skin-engine.ts` — 可逆引擎 + 画布纯函数（含兼容模式 `readCompatMode` / `withCompatMode` / `isBackgroundToken` / `paintableTokens`）（`pickElementAt` / `textHostOf` / `selectorOf` / `withManagedDeclarations` / `sameDeclarations` / `stepValue` / `transformValue` / `parseTransform` / `transformEdit` / `transformPreview` / `fontFaceRule` / `fontFormat` / `elementLabel` /
   `declarationOf` / `removedControls` / `isRemovedRule` / `withControlRestored` / `withAllControlsRestored` / `naturalDisplayOf` / `keepStylesheetLast` /
   `resolveImageAnchor` / `anchorTextOf`）。
 - `src/client/MySkinSection.tsx` — 「皮肤管理」页 + 画布编辑器（含 `WheelNudge` / `ElementBox` / `Section` / `Field` / `RecycleBin`）。
@@ -590,7 +670,7 @@ DSH **通用皮肤框架**：可视化自定义 + 实时预览 + 「皮肤管理
 - `src/client/canvas-ui.ts` — 编辑器外观与动效样式表（`canvasUiRules` / `mountCanvasUi` / `setDrawCursor` / `attachWheelNudge`；左停靠的镜像动效也在里面）。
 - `src/client/dock.ts` — 面板停靠侧（`DockSide` / `DOCK_ATTRIBUTE` / `DOCK_STORAGE_KEY` / `DEFAULT_DOCK` / `otherDock` / `isDockSide` / `browserStorage` / `readDockSide` / `writeDockSide` / `applyDockAttribute` / `clearDockAttribute`）。
 - `src/client/occlusion.ts` — 面板遮挡诊断（`SampleRect` / `panelSamplePoints` / `occludingElement` / `sameElements` / `occludedBehindPanel`；纯函数与 DOM 包装分开）。
-- `src/client/dshskin.ts` — 皮肤包读写（零依赖 ZIP + 资源抽取/回填）。
+- `src/client/dshframework.ts` — 皮肤包（.dshframework）读写：零依赖 ZIP + 资源抽取/回填，兼容旧的 .dshskin。
 - `src/client/desktop.ts` / `icons.ts` / `presets.ts` / `token-catalog.ts` / `locales.ts` — 桌面壳适配 / 图标候选表 / 预设 / 令牌目录 / 中英文案。
 - `tests/`（含 `fixtures/xingye-theme.skin.json` 全量主题夹具）、`scripts/`（build / check-compat / check-types）— 改动后跑 `npm test`（166 例）、`npm run check:types`。
   **注意**：`npm run check:compat` 在本机（0.3.8 起）会崩在 `RangeError: Invalid string length`——它的第 5 节把整个 pnpm store

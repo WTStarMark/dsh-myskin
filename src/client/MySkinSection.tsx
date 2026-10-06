@@ -17,7 +17,8 @@ import { IconClose, IconPersonalization, IconPlus, IconTrash } from './icons.ts'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ThemeRuntime } from '@deepseek-ai/dsh-client-ui-theme/client'
-import { imageModeOf, parseSkin, EMPTY_SKIN, type AnchorKind, type BlendMode, type CssRule, type EmbeddedImage, type ImageAnchor, type ImageMode, type InjectedLayer, type NamedSkin, type SkinCanvas, type SkinSettings, type TokenOverrides } from '../skin-schema.ts'
+import { observeWallpaperEngine, wallpaperEngineInstalled } from './interop.ts'
+import { imageModeOf, parseSkin, resetSkin, EMPTY_SKIN, type AnchorKind, type BlendMode, type CssRule, type EmbeddedImage, type ImageAnchor, type ImageMode, type InjectedLayer, type NamedSkin, type SkinCanvas, type SkinSettings, type TokenOverrides } from '../skin-schema.ts'
 import {
   COMPOSER_PLACEHOLDER_SELECTOR, DRAFT_STYLE_ID, FONT_FACE_SELECTOR, HIDE_DECLARATION, REMOVE_DECLARATION,
   anchorTextOf, backgroundSurfaceRules, childTargetIn, currentSettingsPageKey, declarationOf, desktopFrameTint, elementLabel,
@@ -35,6 +36,9 @@ import {
   PLUGIN_ID, pickElementAt, readBackgroundAnchor, readBackgroundOpacity, readImageLayer, removedControls, resolveImageAnchor, resolveImageTargets,
   IMAGE_PAGE_SCOPE_PROPERTY, imagePageMatches, readImagePageScope, sameSettingsPage, selectorOf,
   SNAP_THRESHOLD, snapMove, snapScale, snapTargetsFor, stepValue, surfaceTint, textHostOf, sameDeclarations,
+  isBackgroundToken, readCompatChoice, resolveCompatMode, withCompatMode,
+  paintableRules,
+  paintableTokens,
   transformEdit, transformPreview, transformValue, wallpaperRules, withAllControlsRestored, withBackgroundOpacity,
   withBackgroundAnchor, withControlRestored, withImageLayer, withManagedDeclarations, withoutDeclaration,
 } from './skin-engine.ts'
@@ -52,10 +56,10 @@ import { DOCK_ATTRIBUTE, applyDockAttribute, browserStorage, clearDockAttribute,
 import { PANEL_TABS, PANEL_TAB_LABEL, readPanelTab, writePanelTab, type PanelTab } from './panel-tabs.ts'
 import { occludedBehindPanel, sameElements } from './occlusion.ts'
 import type { ImageLayer, ImageOverlay, RemovedControl, SnapLine } from './skin-engine.ts'
-import { DSHSKIN_EXTENSION, bytesToDataUrl, packSkin, toArrayBuffer, unpackSkin } from './dshskin.ts'
+import { FRAMEWORK_EXTENSION, IMPORT_ACCEPT, bytesToDataUrl, packSkin, toArrayBuffer, unpackSkin } from './dshframework.ts'
 import { isAnimatedGif, isGif } from './gif.ts'
 import { diagnoseEmbeddedImage } from './image-diag.ts'
-import { VARIANT_AXES, VARIANT_LOOKS, applyVariantLook, applyVariantOption, clearVariant, optionFor, readVariantChoices } from './variants.ts'
+import { VARIANT_AXES, VARIANT_LOOKS, ALL_REGIONS, applyVariantLook, applyVariantOption, choicesFor, clearVariant, readVariantChoices, type ScopeChoices, type VariantAxis, type VariantScope } from './variants.ts'
 import { REGIONS, REGION_FIELDS, REGION_PRESETS, applyRegionPreset, clearRegionStyles, readRegionStyle, regionCount, regionSelector, writeRegionStyle } from './regions.ts'
 import type { RegionField } from './regions.ts'
 import type { ImageDiagnosis } from './image-diag.ts'
@@ -413,6 +417,23 @@ function openSkinEditor(theme: ThemeRuntime, initial: SkinSettings, t: (k: MySki
   )
 }
 
+/**
+ * Whether the wallpaper plugin is loaded right now, kept live.
+ *
+ * A plugin can be installed, enabled or removed while the page is open, and 兼容模式 follows it
+ * (`resolveCompatMode`), so the answer has to be a state, not a one-off read: the observer fires on
+ * exactly the markers that plugin keeps on \`<body>\`.
+ * @returns true while the wallpaper plugin is present.
+ */
+function useWallpaperEnginePresent(): boolean {
+  const [present, setPresent] = useState<boolean>(() => typeof document !== 'undefined' && wallpaperEngineInstalled(document))
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined
+    return observeWallpaperEngine(document, () => { setPresent(wallpaperEngineInstalled(document)) })
+  }, [])
+  return present
+}
+
 /** The section content column. */
 export function MySkinSection(props: MySkinSectionProps): ReactNode {
   const { scope, theme, t, close } = props
@@ -422,7 +443,14 @@ export function MySkinSection(props: MySkinSectionProps): ReactNode {
 
 function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: () => void }): ReactNode {
   const [skin, setSkin] = useState<SkinSettings>(() => parseSkin(scope.getSnapshot().value ?? EMPTY_SKIN))
-  const [notice, setNotice] = useState<string | undefined>(undefined)
+  /** One line of feedback under the rows, with the tone it has to be painted in. */
+  const [notice, setNoticeState] = useState<{ text: string; tone: 'ok' | 'error' } | undefined>(undefined)
+  /**
+   * Show one line of feedback under the rows.
+   * @param text - the message.
+   * @param tone - 'error' paints it as a problem; a refused write must not look like a success.
+   */
+  const setNotice = (text: string, tone: 'ok' | 'error' = 'ok'): void => { setNoticeState({ text, tone }) }
   const [nameDialog, setNameDialog] = useState<{ mode: 'save' | 'rename'; id?: string } | null>(null)
   const [skinName, setSkinName] = useState('我的皮肤')
 
@@ -480,7 +508,7 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
   }
 
   const update = (next: SkinSettings): void => {
-    void persistNow(next).then((report) => { if (!report.ok) setNotice(saveFailureText(report, t, next.canvas)) })
+    void persistNow(next).then((report) => { if (!report.ok) setNotice(saveFailureText(report, t, next.canvas), 'error') })
   }
 
   const applyNow = (): void => {
@@ -488,18 +516,9 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
     setNotice(t('saved'))
   }
 
-  // One-click live preview: enable the current skin, then close the dialog so
-  // you can see it on the app surface.
-  const onPreview = (): void => {
-    if (Object.keys(skin.tokens).length === 0 && skin.css.length === 0 && skin.text.length === 0) {
-      setNotice(t('none'))
-      return
-    }
-    update({ ...skin, enabled: true })
-    close?.()
-  }
-
-  const reset = (): void => { update(EMPTY_SKIN); setNotice(t('reset')) }
+  // 还原默认 clears the LOOK, never the library: resetSkin keeps every saved skin (and its
+  // assets) so one click cannot destroy user data. See resetSkin in ../skin-schema.ts.
+  const reset = (): void => { update(resetSkin(skin)); setNotice(t('reset')) }
   const applyPreset = (id: string): void => {
     const preset = PRESETS.find((p) => p.id === id)
     if (preset === undefined) return
@@ -509,7 +528,7 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
 
   const importRef = useRef<HTMLInputElement | null>(null)
   /**
-   * Export the whole document as a `.dshskin` package.
+   * Export the whole document as a `.dshframework` package.
    *
    * The package keeps the document (tokens / css / text / canvas / layers / library) in
    * `manifest.json` and every wallpaper, embedded image and embedded font as a real file
@@ -524,13 +543,13 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = name.replace(/[\\/:*?"<>|]/g, '-') + DSHSKIN_EXTENSION
+    a.download = name.replace(/[\\/:*?"<>|]/g, '-') + FRAMEWORK_EXTENSION
     a.click()
     URL.revokeObjectURL(url)
     setNotice(t('exportedOk') + ' · ' + t('assetsLabel') + ' ' + String(manifest.assets.length))
   }
   /**
-   * Import a `.dshskin` package (or a legacy JSON export — files on disk stay usable).
+   * Import a `.dshframework` package — or the previous `.dshskin`, or a legacy JSON export: files on disk stay usable.
    * @param e - the hidden file input's change event.
    */
   const onImportFile = (e: ChangeEvent<HTMLInputElement>): void => {
@@ -593,6 +612,11 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
   }
 
   // Token override editor state.
+  // 兼容模式 as it is in effect: the document's explicit choice, or "follow the wallpaper plugin"
+  // while the switch has never been touched (see resolveCompatMode).
+  const enginePresent = useWallpaperEnginePresent()
+  const compatChoice = readCompatChoice(skin)
+  const compatMode = resolveCompatMode(compatChoice, enginePresent)
   const activePreset = activePresetId(skin)
   const presetOf = PRESETS.find((p) => p.id === activePreset)
   const currentLabel = presetOf !== undefined
@@ -629,16 +653,26 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
         <SkinToggle checked={skin.enabled} onChange={(v) => update({ ...skin, enabled: v })} status={skin.enabled ? t('enabledOn') : t('enabledOff')} />
       </div>
 
+      {/* 兼容模式: the skin stays a guest on a page whose background belongs to another plugin.
+          Stored as a marker in css (see withCompatMode) so it needs no Host restart to survive. */}
+      <div style={rowStyle}>
+        <span style={rowTitleStyle}>{t('compat')}</span>
+        <span style={{ flex: 1 }} />
+        <SkinToggle checked={compatMode} onChange={(v) => update({ ...skin, css: withCompatMode(skin.css, v) })} status={compatMode ? t('enabledOn') : t('enabledOff')} />
+      </div>
+      <div style={{ ...lastRowStyle, color: compatMode ? tok.brand : tok.labelTertiary, fontSize: 12, lineHeight: '18px' }}>
+        {enginePresent && compatChoice === 'auto' ? t('compatAutoHint') + ' ' : ''}{t('compatHint')}
+      </div>
+
       <div style={lastRowStyle}>
         <Button style={btnBase} variant="outline" icon={<IconPersonalization size={16} />} onClick={() => { close?.(); openSkinEditor(theme, skin, t, (next) => persistNow(next), () => {}, (canvas, css) => persistStrength(canvas, css)) }}>{t('edit')}</Button>
-        <Button style={btnBase} variant="outline" onClick={onPreview}>{t('preview')}</Button>
         <Button style={btnBase} onClick={applyNow}>{t('apply')}</Button>
         <Button style={btnBase} variant="ghost" onClick={reset}>{t('reset')}</Button>
         <span style={{ flex: 1 }} />
         <Button style={btnBase} size="sm" variant="ghost" onClick={saveSkin}>{t('saveSkin')}</Button>
         <Button style={btnBase} size="sm" variant="ghost" onClick={onExport}>{t('exportSkin')}</Button>
         <Button style={btnBase} size="sm" variant="ghost" onClick={() => { importRef.current?.click() }}>{t('importSkin')}</Button>
-        <input ref={importRef} type="file" accept={'.dshskin,.zip,application/json,.json'} style={{ display: 'none' }} onChange={onImportFile} />
+        <input ref={importRef} type="file" accept={IMPORT_ACCEPT} style={{ display: 'none' }} onChange={onImportFile} />
       </div>
 
       <div style={{ ...lastRowStyle, color: tok.labelTertiary, fontSize: 12, lineHeight: '18px' }}>{t('skinPackHint')}</div>
@@ -663,7 +697,7 @@ function Loaded({ scope, theme, t, close }: MySkinSectionInjected & { close?: ()
           ))}
         </>
       )}
-      {notice === undefined ? null : <p style={{ margin: '6px 0 0', fontSize: 12, lineHeight: '18px', color: tok.success }}>{notice}</p>}
+      {notice === undefined ? null : <p style={{ margin: '6px 0 0', fontSize: 12, lineHeight: '18px', color: notice.tone === 'error' ? tok.error : tok.success }}>{notice.text}</p>}
 
       <Modal
         open={nameDialog !== null}
@@ -932,6 +966,14 @@ function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStreng
   const [draft, setDraft] = useState<SkinSettings>(() => parseSkin(initial))
   /** Signature of the draft's tokens: what the live token preview has to react to. */
   const tokenKey = Object.entries(draft.tokens).map(([name, modes]) => name + ':' + modes.light + '/' + modes.dark).join(';')
+  /**
+   * 兼容模式 as the DRAFT asks for it.
+   *
+   * The preview has to obey it exactly like the engine does, or the editor would show a wallpaper
+   * and a palette that saving cannot reproduce — and the token panel uses it to say which entries
+   * are being skipped instead of leaving "I changed it and nothing happened" to the user.
+   */
+  const compatMode = resolveCompatMode(readCompatChoice(draft), useWallpaperEnginePresent())
   const [selected, setSelected] = useState<Element | undefined>(undefined)
   const [mode, setMode] = useState<'edit' | 'interact'>('edit')
   const [showTokens, setShowTokens] = useState(false)
@@ -1392,12 +1434,16 @@ function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStreng
   // Live CSS + background preview: an owned style tag over the real DOM.
   useEffect(() => {
     const rules: string[] = []
-    if (draft.canvas.background !== undefined && draft.canvas.background !== '') {
+    // 兼容模式 paints nothing that would cover somebody else's background — the wallpaper and the
+    // surface translucency that exists only for it (see readCompatMode).
+    if (!compatMode && draft.canvas.background !== undefined && draft.canvas.background !== '') {
       const opacity = readBackgroundOpacity(draft)
       rules.push(...wallpaperRules(document, draft.canvas.background, surfaceTint(document, opacity, desktopFrameTint(document)), readBackgroundAnchor(draft)))
       rules.push(...backgroundSurfaceRules(document, opacity, desktopFrameTint(document)))
     }
-    for (const { selector, rule } of draft.css) {
+    // Same filter the engine applies (see paintableRules): 兼容模式 drops the panel fills, and a
+    // preview that kept them would promise a surface saving will not paint.
+    for (const { selector, rule } of paintableRules(draft.css, compatMode)) {
       if (selector !== '' && rule !== '') rules.push(selector + ' { ' + rule + ' }')
     }
     for (const img of draft.canvas.images) {
@@ -1440,7 +1486,7 @@ function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStreng
       liveStyleRef.current.remove()
       liveStyleRef.current = null
     }
-  }, [draft.css, draft.canvas.background, draft.canvas.backgroundOpacity, draft.canvas.images, restoredLive])
+  }, [draft.css, draft.canvas.background, draft.canvas.backgroundOpacity, draft.canvas.images, restoredLive, compatMode])
 
   /**
    * The draft's images as one string: id, painting mode and anchor.
@@ -1590,6 +1636,29 @@ function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStreng
     snapshot()
     const rules = draft.css.filter((r) => r.selector !== selector)
     setDraft({ ...draft, css: [...rules, { selector, rule: declaration }] })
+  }
+  /**
+   * Drop one selector's whole rule — the geek card's 还原默认.
+   *
+   * Clearing the code box alone could not restore anything: the rule it was typed into lives in
+   * the draft (and, once saved, in the document), so the page kept the style and the box refilled
+   * itself from the document on the next edit. This removes the rule itself, which is what the
+   * element's other fields do one property at a time.
+   * @param selector - the selector whose rule goes away.
+   */
+  const clearStyle = (selector: string): void => {
+    if (selector === '') return
+    // No undo entry when there is nothing to drop (the button is also reachable with an empty rule).
+    if (!draftRef.current.css.some((entry) => entry.selector === selector)) return
+    snapshot()
+    // A rule that was keeping a removed control visible in the preview goes with it.
+    setRestoredLive((prev) => {
+      if (prev[selector] === undefined) return prev
+      const next = { ...prev }
+      delete next[selector]
+      return next
+    })
+    setDraft((prev) => ({ ...prev, css: prev.css.filter((entry) => entry.selector !== selector) }))
   }
   const liveApplyRef = useRef(false)
   const liveTransformRef = useRef(false)
@@ -1887,26 +1956,34 @@ function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStreng
    */
   useEffect(() => {
     if (typeof document === 'undefined') return undefined
-    const tokens = draftRef.current.tokens
+    const tokens = paintableTokens(draftRef.current.tokens, resolveCompatMode(readCompatChoice(draftRef.current), wallpaperEngineInstalled(document)))
     const dark = document.body.hasAttribute('data-ds-dark-theme') || document.documentElement.style.colorScheme === 'dark'
-    /** What was on the element BEFORE us, so the cleanup can hand it back. */
+    /** What was on the element BEFORE us, and what we wrote — the cleanup needs both. */
     const previous = new Map<string, string>()
+    const applied = new Map<string, string>()
     for (const [name, modes] of Object.entries(tokens)) {
+      const value = dark ? modes.dark : modes.light
       previous.set(name, document.body.style.getPropertyValue(name))
-      document.body.style.setProperty(name, dark ? modes.dark : modes.light)
+      applied.set(name, value)
+      document.body.style.setProperty(name, value)
     }
     const dispose = typeof theme.overrideTokens === 'function' ? theme.overrideTokens(PLUGIN_ID, tokens) : undefined
     return () => {
       if (typeof dispose === 'function') dispose()
       // The engine binds the COMMITTED tokens to the very same inline properties: removing ours outright
-      // would blank the saved skin until the next apply. Hand back what was there instead.
+      // would blank the saved skin until the next apply. Hand back what was there instead — but only
+      // while the value is still OURS. After 还原默认 / 停用 the engine has already disposed, and writing
+      // the old value back here would resurrect a token the document no longer carries (the same
+      // "only undo my own write" rule the text patches use). The effect can be torn down either side
+      // of that dispose, so this must not depend on the order.
       for (const [name, before] of previous) {
+        if (document.body.style.getPropertyValue(name) !== applied.get(name)) continue
         if (before === '') document.body.style.removeProperty(name)
         else document.body.style.setProperty(name, before)
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tokenKey, theme])
+  }, [tokenKey, compatMode, theme])
   /**
    * 层级: put one image above or below its container's content (auto = the blend mode decides).
    * @param id - the image id.
@@ -2078,7 +2155,44 @@ function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStreng
     }
   }
 
-  const resetDraft = (): void => { snapshot(); setDraft(parseSkin(EMPTY_SKIN)); setSelected(undefined); setRestoredLive({}); restoreLiveText() }
+  /**
+   * 还原默认: leave the draft empty AND put the committed skin back to the native look.
+   *
+   * Resetting only the draft could never restore anything: the committed document keeps painting
+   * through the engine (its stylesheet and its token variables), and the editor's own layer can
+   * only ADD to that — which is exactly the "还原默认 does nothing" report. So the identity
+   * document leaves through the same door 保存 uses, the engine disposes the old skin, and the page
+   * really is DSH's own again. The skin LIBRARY survives: 还原默认 is about the current look, not
+   * about deleting the skins the user saved (see resetSkin).
+   *
+   * The undo entry is pushed first, so Ctrl+Z brings the whole skin back into the draft — as a
+   * draft, like every other undo here, which means 保存 / 应用 is what makes it durable again.
+   */
+  const resetAll = (): void => {
+    setConfirmReset(false)
+    setHint(undefined)
+    setFlash(undefined)
+    const next = resetSkin(draft)
+    snapshot()
+    setDraft(next)
+    setSelected(undefined)
+    setSelectedImage(undefined)
+    setRestoredLive({})
+    restoreLiveText()
+    setSave({ state: 'saving' })
+    void onSave({ ...next }).then((report) => {
+      if (report.ok) {
+        committedImagesRef.current = next.canvas.images
+        setRestoredLive({})
+        setSave({ state: 'saved' })
+        setFlash(t('resetDone'))
+        return
+      }
+      const detail = saveFailureText(report, t, next.canvas)
+      setSave({ state: 'failed', detail })
+      setHint(detail)
+    })
+  }
   /**
    * 保存: write the draft into the skin document and KEEP editing.
    *
@@ -2352,7 +2466,7 @@ function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStreng
           {confirmReset ? (
             <>
               <span style={{ fontSize: 12, lineHeight: '18px', whiteSpace: 'nowrap', color: tok.warn }}>{t('resetConfirm')}</span>
-              <Button style={btnBase} size="sm" variant="outline" onClick={() => { setConfirmReset(false); resetDraft() }}>{t('confirm')}</Button>
+              <Button style={btnBase} size="sm" variant="outline" onClick={resetAll}>{t('resetGo')}</Button>
               <Button style={btnBase} size="sm" variant="ghost" onClick={() => { setConfirmReset(false) }}>{t('cancel')}</Button>
             </>
           ) : (
@@ -2377,6 +2491,11 @@ function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStreng
           page: everything that is not the inset (position, border, the fold animation, the shadow
           in canvas-ui.ts) follows `dock`, so the two layouts cannot drift apart. */}
       <div ref={panelRef} className="dsh-myskin-panel dsh-myskin-scroll" data-open={panelOpen ? '1' : '0'} data-dsh-myskin-ui="1" style={{ pointerEvents: panelOpen ? 'auto' : 'none', visibility: panelOpen ? 'visible' : 'hidden', position: 'absolute', top: 'calc(var(--dsh-myskin-chrome-top, 0px) + var(--dsh-myskin-inset-top, 48px))', ...(dock === 'right' ? { right: 0 } : { left: 0 }), bottom: 0, width: panelOpen ? PANEL_WIDTH : 0, display: 'flex', flexDirection: 'column', gap: 12, overflowX: 'hidden', overflowY: 'auto', padding: panelOpen ? 12 : 0, background: panelOpen ? tok.bgOverlay : 'transparent', borderLeft: panelOpen && dock === 'right' ? '1px solid ' + tok.borderL2 : 'none', borderRight: panelOpen && dock === 'left' ? '1px solid ' + tok.borderL2 : 'none', zIndex: 10004 }}>
+        {/* 兼容模式 says the background belongs to somebody else. Drawing one would look like it
+            works (the draft preview obeys the mode too, so it shows nothing) — say why. */}
+        {mode === 'edit' && compatMode ? (
+          <div style={{ fontSize: 11, lineHeight: '16px', color: tok.warn, padding: '0 2px' }}>{t('compatBackgroundHint')}</div>
+        ) : null}
         {mode === 'edit' && panelTab === 'look' && draft.canvas.background !== undefined && draft.canvas.background !== '' ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: tok.labelSecondary }}>
@@ -2434,6 +2553,7 @@ function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStreng
                 draft={draft}
                 onSample={liveApply}
                 onReplaceStyle={applyStyle}
+            onClearStyle={clearStyle}
                 onText={addText}
                 onLiveText={liveText}
                 onRemoveText={removeText}
@@ -2513,11 +2633,11 @@ function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStreng
         ) : null}
         {/* 变体：整套观感用选项拼出来，不需要写 CSS。 */}
         {mode === 'edit' && panelTab === 'variant' ? (
-          <VariantPanel draft={draft} onChangeSkin={setMarkdownSkin} t={t} />
+          <VariantPanel draft={draft} compat={compatMode} onChangeSkin={setMarkdownSkin} t={t} />
         ) : null}
         {/* 区域外观：整块改一个面（对话区/侧边栏/输入框/设置页/消息列表）。 */}
         {mode === 'edit' && panelTab === 'region' ? (
-          <RegionPanel draft={draft} onChangeSkin={setMarkdownSkin} t={t} />
+          <RegionPanel draft={draft} compat={compatMode} onChangeSkin={setMarkdownSkin} t={t} />
         ) : null}
         {/* 对话排版：DSH 生成的 markdown（锚点取渲染器自己的根元素，不写死构建哈希）。 */}
         {mode === 'edit' && panelTab === 'markdown' ? (
@@ -2563,7 +2683,7 @@ function SkinCanvas({ theme, initial, onClose, onSave, onCommit, onPersistStreng
           />
         ) : null}
         {mode === 'edit' && panelTab === 'look' && showTokens ? (
-          <TokenPanel tokens={draft.tokens} onToggle={toggleToken} onChange={setToken} t={t} />
+          <TokenPanel tokens={draft.tokens} compat={compatMode} onToggle={toggleToken} onChange={setToken} t={t} />
         ) : null}
       </div>
       <input ref={embedBgRef} type="file" accept="image/*" multiple={false} style={{ display: 'none' }} onChange={onEmbedBgFile} />
@@ -2702,6 +2822,8 @@ function imageDiagKey(diagnosis: ImageDiagnosis | undefined): MySkinKey {
 interface VariantPanelProps {
   /** The document being edited (the current choices are read out of its marker). */
   draft: SkinSettings
+  /** 兼容模式 in effect: the fill axis writes a surface, and the card has to say when it is not painted. */
+  compat: boolean
   /** Replace the document (the caller snapshots for undo). */
   onChangeSkin: (next: SkinSettings) => void
   t: (key: MySkinKey) => string
@@ -2710,43 +2832,101 @@ interface VariantPanelProps {
 /**
  * 「变体」: choose a look, do not write one.
  *
- * Whole looks first (one click each), then the four axes behind them — and every axis shows its options
- * as plain words (`玻璃` / `纸片` / `描边` / `无框`), because the point of a variant is that the user does
- * not need to know what `backdrop-filter` is. The chosen option is read back out of the document marker,
- * so the card always shows what is actually in effect.
+ * Three layers, each answering a different question: 作用对象 (WHERE this click lands — everything, or
+ * one region), whole looks (one click each), then the axes behind them (WHAT changes). Every axis shows
+ * its options as plain words (`玻璃` / `描边` / `透明`), because the point of a variant is that the user
+ * does not need to know what `backdrop-filter` is; the chosen option is read back out of the document
+ * marker — per scope — so the card always shows what is actually in effect for the place being edited.
  * @param draft - the document being edited.
+ * @param compat - 兼容模式 in effect (the fill axis is not painted then).
  * @param onChangeSkin - writes the new document.
  * @param t - copy lookup.
  */
-function VariantPanel({ draft, onChangeSkin, t }: VariantPanelProps): ReactNode {
-  const choices = readVariantChoices(draft)
+function VariantPanel({ draft, compat, onChangeSkin, t }: VariantPanelProps): ReactNode {
+  /** Where the next click lands. UI state on purpose: it is a cursor, not part of the skin. */
+  const [scope, setScope] = useState<VariantScope>(ALL_REGIONS)
+  const choices = choicesFor(readVariantChoices(draft), scope)
+  /**
+   * One axis as a row: name, then its option buttons.
+   *
+   * `fallback` is the copy shown for an axis nobody has chosen yet. Main axes say nothing (their
+   * first option is what the page looks like anyway); a corner says "跟随统一圆角", because for a
+   * corner "not chosen" and "chosen 直角" are genuinely different — and highlighting 直角 there would
+   * claim a decision the user never made.
+   */
+  const optionRow = (entry: VariantAxis, current: ScopeChoices, fallback: string): ReactNode => {
+    const chosen = current[entry.id]
+    // The fill axis is a surface: 兼容模式 drops it at paint time (`paintableRules`), and the axis
+    // name has to say so or the buttons look broken.
+    const dropped = compat && entry.id === 'fill'
+    return (
+      <>
+        <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>
+          {t(entry.labelKey as MySkinKey)}
+          {dropped ? <span style={{ marginLeft: 6, fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('compatPanelTag')}</span> : null}
+          {chosen === undefined ? <span style={{ marginLeft: 6, fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{fallback}</span> : null}
+        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          {entry.options.map((option) => (
+            <Button key={option.id} size="sm" variant={option.id === chosen ? 'primary' : 'ghost'} style={btnBase}
+              title={t(option.hintKey as MySkinKey)}
+              onClick={() => { onChangeSkin(applyVariantOption(draft, entry, option, scope)) }}>{t(option.labelKey as MySkinKey)}</Button>
+          ))}
+        </div>
+      </>
+    )
+  }
+  const scopeLabel = (id: VariantScope): string => id === ALL_REGIONS
+    ? t('variantScopeAll')
+    : t((REGIONS.find((region) => region.id === id)?.labelKey ?? 'variantScopeAll') as MySkinKey)
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>{t('variantTitle')}</span>
       <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('variantHint')}</span>
+      {/* 作用对象: 只改某一处，就在这一行选它，而不是离开卡片去「区域」页签。 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>{t('variantScope')}</span>
+        {[ALL_REGIONS, ...REGIONS.map((region) => region.id)].map((id) => (
+          <Pill key={id} style={btnBase} active={id === scope} onClick={() => { setScope(id) }}>{scopeLabel(id)}</Pill>
+        ))}
+        {scope === ALL_REGIONS ? null : <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('variantGlobalHint')}</span>}
+      </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
         {VARIANT_LOOKS.map((look) => (
           <Button key={look.id} style={btnBase} size="sm" variant="outline" title={t(look.hintKey as MySkinKey)}
-            onClick={() => { onChangeSkin(applyVariantLook(draft, look)) }}>{t(look.labelKey as MySkinKey)}</Button>
+            onClick={() => { onChangeSkin(applyVariantLook(draft, look, scope)) }}>{t(look.labelKey as MySkinKey)}</Button>
         ))}
         <Button style={btnBase} size="sm" variant="ghost" title={t('variantResetHint')}
           onClick={() => { onChangeSkin(clearVariant(draft)) }}>{t('mdReset')}</Button>
       </div>
-      {VARIANT_AXES.map((axis) => {
-        const current = optionFor(axis, choices)
+      {VARIANT_AXES.filter((axis) => axis.subOf === undefined).map((axis) => {
+        const children = VARIANT_AXES.filter((entry) => entry.subOf === axis.id)
         return (
           <div key={axis.id} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <span style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary }}>{t(axis.labelKey as MySkinKey)}</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              {axis.options.map((option) => (
-                <Button key={option.id} size="sm" variant={option.id === current.id ? 'primary' : 'ghost'} style={btnBase}
-                  title={t(option.hintKey as MySkinKey)}
-                  onClick={() => { onChangeSkin(applyVariantOption(draft, axis, option)) }}>{t(option.labelKey as MySkinKey)}</Button>
-              ))}
-            </div>
+            {optionRow(axis, choices, t('variantCornerFollow'))}
+            {children.length === 0 ? null : (
+              // 四角单独调: four more rows of the same five buttons, so they go behind a summary —
+              // and only a corner that was actually CHOSEN is highlighted (an untouched corner
+              // follows the uniform value, which is not the same as having picked 直角 for it).
+              <details>
+                <summary style={{ fontSize: 12, lineHeight: '18px', color: tok.labelSecondary, cursor: 'pointer' }}>{t('variantCorners')}</summary>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 6 }}>
+                  <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('variantCornersHint')}</span>
+                  {children.map((child) => (
+                    <div key={child.id} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {optionRow(child, choices, t('variantCornerFollow'))}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
           </div>
         )
       })}
+      {compat ? (
+        <span style={{ fontSize: 11, lineHeight: '16px', color: tok.warn }}>{t('variantCompatHint')}</span>
+      ) : null}
+      <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('variantScopeHint')}</span>
       <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('variantNote')}</span>
     </div>
   )
@@ -2755,6 +2935,8 @@ function VariantPanel({ draft, onChangeSkin, t }: VariantPanelProps): ReactNode 
 interface RegionPanelProps {
   /** The document being edited (values are read back out of its `css`). */
   draft: SkinSettings
+  /** 兼容模式 in effect: the fill field is not painted then, and the row has to say so. */
+  compat: boolean
   /** Replace the document (the caller snapshots for undo). */
   onChangeSkin: (next: SkinSettings) => void
   t: (key: MySkinKey) => string
@@ -2771,9 +2953,10 @@ interface RegionPanelProps {
  * @param onChangeSkin - writes the new document.
  * @param t - copy lookup.
  */
-function RegionPanel({ draft, onChangeSkin, t }: RegionPanelProps): ReactNode {
+function RegionPanel({ draft, compat, onChangeSkin, t }: RegionPanelProps): ReactNode {
   const [regionId, setRegionId] = useState<string>(REGIONS[0].id)
   const region = REGIONS.find((entry) => entry.id === regionId) ?? REGIONS[0]
+
   const values = readRegionStyle(draft.css, region)
   /** How many elements this region resolves to on the page in front of the user. */
   const count = regionCount(document, region)
@@ -2803,10 +2986,19 @@ function RegionPanel({ draft, onChangeSkin, t }: RegionPanelProps): ReactNode {
         <Button style={btnBase} size="sm" variant="ghost" title={t('regionResetHint')}
           onClick={() => { onChangeSkin({ ...draft, css: clearRegionStyles(draft.css) }) }}>{t('mdReset')}</Button>
       </div>
+      <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('regionCornersHint')}</span>
       {REGION_FIELDS.filter((field) => field.kind !== 'option' || field.options !== undefined).map((field) => {
         const label = t(field.labelKey as MySkinKey)
         const raw = values.get(field.id)
-        if (field.kind === 'color') return <ColorRow key={field.id} label={label} raw={raw} clearTitle={t('mdUnset')} onSet={(value) => { write(field, value) }} />
+        if (field.kind === 'color') {
+          // Only the fill is dropped: a border colour is not a surface and keeps working.
+          return (
+            <Fragment key={field.id}>
+              {field.id === 'bg' && compat ? <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary }}>{t('compatPanelTag')}</span> : null}
+              <ColorRow label={label} raw={raw} clearTitle={t('mdUnset')} onSet={(value) => { write(field, value) }} />
+            </Fragment>
+          )
+        }
         if (field.kind === 'option') {
           return (
             <Field key={field.id} label={label} clearTitle={t('mdUnset')} clearable={raw !== undefined} onClear={() => { write(field, undefined) }}>
@@ -3501,6 +3693,8 @@ interface InspectorProps {
   onSample: (selector: string, declaration: string) => void
   /** Replace one selector's whole rule (geek mode: the user typed the CSS themselves). */
   onReplaceStyle: (selector: string, declaration: string) => void
+  /** Drop one selector's whole rule (geek mode 还原默认: put the element back the way DSH drew it). */
+  onClearStyle: (selector: string) => void
   onText: (selector: string, before: string, after: string) => void
   /** Preview the text field on the live page without adding a history entry per keypress. */
   onLiveText: (selector: string, before: string, after: string) => void
@@ -3571,7 +3765,7 @@ interface InspectorProps {
   t: (key: MySkinKey) => string
 }
 
-function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText, onRemoveText, onRemove, onHide, onUnhide, onRemoveControl, onRestoreControl, onSelectParent, onSelectChild, onEmbedFont, onRemoveFont, activeSelector, group, site, settingsView, pageView, surfaces, inSettings, onSurfaceHidden, onKeepOnly, onHideEverywhere, onRestoreAllHidden, onAddDeclaration, scope, onScope, gapSelector, gap, onGap, onGapEnd, onRoleFont, onRoleFontEnd, transformAuthored, t }: InspectorProps): ReactNode {
+function Inspector({ target, draft, onSample, onReplaceStyle, onClearStyle, onText, onLiveText, onRemoveText, onRemove, onHide, onUnhide, onRemoveControl, onRestoreControl, onSelectParent, onSelectChild, onEmbedFont, onRemoveFont, activeSelector, group, site, settingsView, pageView, surfaces, inSettings, onSurfaceHidden, onKeepOnly, onHideEverywhere, onRestoreAllHidden, onAddDeclaration, scope, onScope, gapSelector, gap, onGap, onGapEnd, onRoleFont, onRoleFontEnd, transformAuthored, t }: InspectorProps): ReactNode {
   const [fontSize, setFontSize] = useState('')
   const [color, setColor] = useState('')
   const [bg, setBg] = useState('')
@@ -4198,7 +4392,19 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
 
           <div style={{ display: 'flex', gap: 6 }}>
             <Button style={btnBase} variant="outline" onClick={applyGeek}>{t('apply')}</Button>
-            <Button style={btnBase} variant="ghost" onClick={() => { setGeekCss('') }}>{t('reset')}</Button>
+            <Button style={btnBase} variant="ghost" onClick={() => {
+              // 还原默认 hands the element back to DSH completely. Dropping the rule while the
+              // panel still OWNS its fields would only write them back one render later (the
+              // preview effect re-emits every property the mirror marked as touched), so the
+              // panel gives up ownership first — the rule and the fields go together.
+              setTouched({})
+              transformAuthored.current = false
+              setTransX('')
+              setTransY('')
+              setScale('')
+              setGeekCss('')
+              onClearStyle(geekSel)
+            }}>{t('reset')}</Button>
           </div>
           <details>
             <summary style={{ fontSize: 12, color: tok.labelTertiary, cursor: 'pointer' }}>{t('codeRef')}</summary>
@@ -4427,16 +4633,6 @@ function Inspector({ target, draft, onSample, onReplaceStyle, onText, onLiveText
   )
 }
 
-/** Build a structural selector for a real DSH node, relative to the app root. */
-
-interface TokenPanelProps {
-  tokens: TokenOverrides
-  onToggle: (name: string, on: boolean) => void
-  onChange: (name: string, light: string, dark: string) => void
-  t: (key: MySkinKey) => string
-}
-
-
 /** Light CSS syntax highlighting for the editor preview (best-effort). */
 function highlightCss(css: string): string {
   const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -4492,15 +4688,16 @@ function CodeEditor({ value, onChange }: { value: string; onChange: (v: string) 
 }
 
 /** Visual token palette for the canvas: group + toggle + light/dark picker. */
-
 interface TokenPanelProps {
   tokens: TokenOverrides
+  /** 兼容模式: the background family is stored but not written — say so instead of doing nothing. */
+  compat?: boolean
   onToggle: (name: string, on: boolean) => void
   onChange: (name: string, light: string, dark: string) => void
   t: (key: MySkinKey) => string
 }
 
-function TokenPanel({ tokens, onToggle, onChange, t }: TokenPanelProps): ReactNode {
+function TokenPanel({ tokens, compat = false, onToggle, onChange, t }: TokenPanelProps): ReactNode {
   const groups: TokenGroup[] = ['background', 'border', 'brand', 'label', 'button', 'interactive']
   const groupLabel = (g: TokenGroup): string => t(TOKEN_GROUP_KEYS[g] as MySkinKey)
   const current = (name: string): string => tokens[name]?.light ?? (getComputedStyle(document.body).getPropertyValue(name).trim() || '#808080')
@@ -4526,11 +4723,16 @@ function TokenPanel({ tokens, onToggle, onChange, t }: TokenPanelProps): ReactNo
             {items.map((item) => {
               const on = Object.prototype.hasOwnProperty.call(tokens, item.name)
               const cur = current(item.name)
+              // 兼容模式 leaves the background family alone: the value stays in the document (so
+              // turning the mode off restores it) but never reaches the page — which is exactly what
+              // the row has to say, or its color pickers look broken.
+              const skipped = compat && isBackgroundToken(item.name)
               return (
                 <div key={item.name} className="dsh-myskin-field" style={rowStyle}>
                   <input type="checkbox" checked={on} onChange={(e) => { onToggle(item.name, e.target.checked) }} style={{ accentColor: 'var(--dsw-alias-brand-primary)', width: 14, height: 14, cursor: 'pointer', flex: 'none' }} />
                   <span style={{ width: 14, height: 14, borderRadius: 5, border: '1px solid ' + tok.borderL2, background: on ? cur : tok.bgLayer2, flex: 'none' }} />
-                  <span style={nameStyle}>{item.name}</span>
+                  <span style={skipped ? { ...nameStyle, color: tok.labelTertiary } : nameStyle}>{item.name}</span>
+                  {skipped ? <span style={{ fontSize: 11, lineHeight: '16px', color: tok.labelTertiary, whiteSpace: 'nowrap' }}>{t('compatTokenTag')}</span> : null}
                   {on ? (
                     <>
                       <input type="color" value={pick(tokens[item.name].light)} onChange={(e) => { onChange(item.name, e.target.value, tokens[item.name].dark) }} style={{ width: 24, height: 22, padding: 0, border: '1px solid ' + tok.borderL2, borderRadius: 4, background: 'transparent', cursor: 'pointer' }} />
